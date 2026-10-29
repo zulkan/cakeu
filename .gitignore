@@ -1,0 +1,18 @@
+# Secrets - never commit
+.env
+*.env
+!*.env.example
+
+# Backend runtime artifacts
+be/logs/
+*.log
+
+# Frontend dependencies and build output
+fe/node_modules/
+fe/dist/
+
+# Agent tooling state
+.omo/
+
+# OS
+.DS_Store

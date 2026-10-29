@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+
+  /* Brand - warm soft orange */
+  --color-brand-50: #FFF7ED;
+  --color-brand-100: #FFEDD5;
+  --color-brand-200: #FED7AA;
+  --color-brand-300: #FDBA74;
+  --color-brand-400: #FB923C;
+  --color-brand-500: #F97316;
+  --color-brand-600: #EA580C;
+  --color-brand-700: #C2410C;
+  --color-brand-800: #9A3412;
+  --color-brand-900: #7C2D12;
+  --color-brand-950: #431407;
+
+  /* Warm neutrals for backgrounds and text */
+  --color-warm-50: #FFFBF5;
+  --color-warm-100: #FEF3E7;
+  --color-warm-200: #FDE6CC;
+  --color-warm-300: #FBD5A5;
+  --color-warm-400: #F8B96E;
+  --color-warm-500: #F49E3F;
+  --color-warm-600: #E8821A;
+  --color-warm-700: #C56314;
+  --color-warm-800: #9E4B14;
+  --color-warm-900: #7F3D14;
+  --color-warm-950: #451E09;
+
+  /* Semantic colors */
+  --color-income: #16A34A;
+  --color-income-light: #DCFCE7;
+  --color-expense: #DC2626;
+  --color-expense-light: #FEE2E2;
+
+  /* Backgrounds */
+  --color-surface: #FFFBF5;
+  --color-surface-card: #FFFFFF;
+  --color-surface-hover: #FEF7F0;
+}
+
+@layer base {
+  body {
+    @apply bg-surface text-stone-800 antialiased;
+    font-family: var(--font-sans);
+  }
+
+  ::selection {
+    @apply bg-brand-200 text-brand-950;
+  }
+}
