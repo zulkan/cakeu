@@ -181,10 +181,5 @@ func RunMigrations(databaseURL string) error {
 }
 
 func isDuplicateEmail(err error) bool {
-	if err == nil {
-		return false
-	}
-	// pgx unique violation for email is usually error code 23505
-	// This is a simplified check; in production, you might check the specific error code
-	return errors.Is(err, pgx.ErrNoRows) == false
+	return isUniqueViolation(err)
 }
