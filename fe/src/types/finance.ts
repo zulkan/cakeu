@@ -72,6 +72,29 @@ export interface CreateCategoryRequest {
   color?: string;
 }
 
+export interface ImportRowError {
+  row: number;
+  message: string;
+}
+
+export interface ImportPreviewRow {
+  row: number;
+  date: string;
+  type: 'income' | 'expense';
+  amount: number;
+  description: string;
+  account: string;
+  category: string;
+}
+
+export interface ImportResult {
+  total: number;
+  valid: number;
+  invalid: number;
+  errors: ImportRowError[];
+  preview: ImportPreviewRow[];
+}
+
 export interface CreateTransactionRequest {
   account_id: string;
   category_id: string;

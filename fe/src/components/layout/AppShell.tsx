@@ -5,6 +5,7 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  MessageSquare,
   Tags,
   Wallet,
   X,
@@ -26,6 +27,7 @@ const navItems: NavItem[] = [
   { to: '/transactions', label: 'Transactions', icon: ArrowLeftRight },
   { to: '/accounts', label: 'Accounts', icon: Wallet },
   { to: '/categories', label: 'Categories', icon: Tags },
+  { to: '/chat', label: 'Assistant', icon: MessageSquare },
 ];
 
 function NavItems({ onNavigate }: { onNavigate?: () => void }) {

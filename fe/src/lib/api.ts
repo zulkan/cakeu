@@ -5,6 +5,7 @@ import type {
   CreateCategoryRequest,
   CreateTransactionRequest,
   DashboardSummary,
+  ImportResult,
   PaginatedTransactions,
   Transaction,
   TransactionFilters,
@@ -26,27 +27,48 @@ function getToken(): string | null {
   }
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+function authHeaders(): Record<string, string> {
   const token = getToken();
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...(options.headers as Record<string, string>),
-  };
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
-  }
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
 
-  const res = await fetch(apiUrl(path), { ...options, headers });
+async function errorMessage(res: Response): Promise<string> {
+  const body = (await res
+    .json()
+    .catch(() => ({ error: res.statusText }))) as { error?: string };
+  return body.error || `Request failed: ${res.status}`;
+}
 
+function handleUnauthorized(res: Response): void {
   if (res.status === 401) {
     useAuthStore.getState().logout();
   }
+}
+
+function buildFilterQuery(filters?: TransactionFilters): string {
+  const params = new URLSearchParams();
+  if (filters?.account_id) params.set('account_id', filters.account_id);
+  if (filters?.category_id) params.set('category_id', filters.category_id);
+  if (filters?.type) params.set('type', filters.type);
+  if (filters?.date_from) params.set('date_from', filters.date_from);
+  if (filters?.date_to) params.set('date_to', filters.date_to);
+  const qs = params.toString();
+  return qs ? `?${qs}` : '';
+}
+
+async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...authHeaders(),
+    ...(options.headers as Record<string, string>),
+  };
+
+  const res = await fetch(apiUrl(path), { ...options, headers });
+
+  handleUnauthorized(res);
 
   if (!res.ok) {
-    const body = (await res
-      .json()
-      .catch(() => ({ error: res.statusText }))) as { error?: string };
-    throw new Error(body.error || `Request failed: ${res.status}`);
+    throw new Error(await errorMessage(res));
   }
 
   if (res.status === 204) {
@@ -55,6 +77,31 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   return res.json() as Promise<T>;
 }
+
+async function requestMultipart<T>(path: string, body: FormData): Promise<T> {
+  // Deliberately no Content-Type: the browser adds the multipart boundary.
+  const res = await fetch(apiUrl(path), {
+    method: 'POST',
+    body,
+    headers: authHeaders(),
+  });
+
+  handleUnauthorized(res);
+
+  if (!res.ok) {
+    throw new Error(await errorMessage(res));
+  }
+
+  return res.json() as Promise<T>;
+}
+
+function importForm(file: File, confirm: boolean): FormData {
+  const form = new FormData();
+  form.append('file', file);
+  if (confirm) form.append('confirm', 'true');
+  return form;
+}
+
 
 export const api = {
   // Accounts
@@ -104,6 +151,33 @@ export const api = {
     }),
   deleteTransaction: (id: string) =>
     request<void>(`/transactions/${id}`, { method: 'DELETE' }),
+
+  exportTransactionsCsv: async (
+    filters?: TransactionFilters
+  ): Promise<Blob> => {
+    const res = await fetch(
+      apiUrl(`/transactions/export.csv${buildFilterQuery(filters)}`),
+      { headers: authHeaders() }
+    );
+
+    handleUnauthorized(res);
+
+    if (!res.ok) {
+      throw new Error(await errorMessage(res));
+    }
+
+    return res.blob();
+  },
+  previewImport: (file: File) =>
+    requestMultipart<ImportResult>(
+      '/transactions/import/preview',
+      importForm(file, false)
+    ),
+  importTransactions: (file: File) =>
+    requestMultipart<ImportResult>(
+      '/transactions/import',
+      importForm(file, true)
+    ),
 
   // Dashboard
   getDashboardSummary: () => request<DashboardSummary>('/dashboard/summary'),

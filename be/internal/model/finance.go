@@ -39,6 +39,38 @@ type Transaction struct {
 	CategoryName string    `json:"category_name"`
 }
 
+type TransactionExportRow struct {
+	Date         time.Time
+	Type         string
+	Amount       float64
+	Description  string
+	AccountName  string
+	CategoryName string
+}
+
+type ImportRowError struct {
+	Row     int    `json:"row"`
+	Message string `json:"message"`
+}
+
+type ImportPreviewRow struct {
+	Row         int     `json:"row"`
+	Date        string  `json:"date"`
+	Type        string  `json:"type"`
+	Amount      float64 `json:"amount"`
+	Description string  `json:"description"`
+	Account     string  `json:"account"`
+	Category    string  `json:"category"`
+}
+
+type ImportResult struct {
+	Total   int                `json:"total"`
+	Valid   int                `json:"valid"`
+	Invalid int                `json:"invalid"`
+	Errors  []ImportRowError   `json:"errors"`
+	Preview []ImportPreviewRow `json:"preview"`
+}
+
 type CreateAccountRequest struct {
 	Name     string  `json:"name" example:"Checking Account"`
 	Balance  float64 `json:"balance" example:"1000.00"`

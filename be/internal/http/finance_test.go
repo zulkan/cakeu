@@ -1,9 +1,11 @@
 package httpserver_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -58,7 +60,8 @@ func (f *fakeAccountService) ListAccounts(ctx context.Context, userID uuid.UUID)
 	return f.accounts, nil
 }
 
-func (f *fakeAccountService) UpdateAccount(ctx context.Context, id uuid.UUID, req model.UpdateAccountRequest) (*model.Account, error) {
+func (f *fakeAccountService) UpdateAccount(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.UpdateAccountRequest) (*model.Account, error) {
+	f.lastUserID = userID
 	f.lastID = id
 	f.lastUpdate = req
 	if f.err != nil {
@@ -70,7 +73,8 @@ func (f *fakeAccountService) UpdateAccount(ctx context.Context, id uuid.UUID, re
 	return &model.Account{ID: id}, nil
 }
 
-func (f *fakeAccountService) DeleteAccount(ctx context.Context, id uuid.UUID) error {
+func (f *fakeAccountService) DeleteAccount(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
+	f.lastUserID = userID
 	f.lastID = id
 	return f.err
 }
@@ -112,20 +116,23 @@ func (f *fakeCategoryService) ListCategories(ctx context.Context, userID uuid.UU
 	return f.categories, nil
 }
 
-func (f *fakeCategoryService) DeleteCategory(ctx context.Context, id uuid.UUID) error {
+func (f *fakeCategoryService) DeleteCategory(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
+	f.lastUserID = userID
 	f.lastID = id
 	return f.err
 }
 
 type fakeTransactionService struct {
-	transaction *model.Transaction
-	paginated   *model.PaginatedTransactions
-	summary     *model.DashboardSummary
-	err         error
-	lastUserID  uuid.UUID
-	lastID      uuid.UUID
-	lastFilters model.TransactionFilters
-	lastCreate  model.CreateTransactionRequest
+	transaction  *model.Transaction
+	paginated    *model.PaginatedTransactions
+	summary      *model.DashboardSummary
+	err          error
+	lastUserID   uuid.UUID
+	lastID       uuid.UUID
+	lastFilters  model.TransactionFilters
+	lastCreate   model.CreateTransactionRequest
+	exportRows   []model.TransactionExportRow
+	importResult *model.ImportResult
 }
 
 func (f *fakeTransactionService) CreateTransaction(ctx context.Context, userID uuid.UUID, req model.CreateTransactionRequest) (*model.Transaction, error) {
@@ -160,7 +167,44 @@ func (f *fakeTransactionService) ListTransactions(ctx context.Context, userID uu
 	return &model.PaginatedTransactions{Data: []model.Transaction{}, Page: 1, PageSize: 20}, nil
 }
 
-func (f *fakeTransactionService) DeleteTransaction(ctx context.Context, id uuid.UUID) error {
+func (f *fakeTransactionService) ExportTransactions(ctx context.Context, userID uuid.UUID, filters model.TransactionFilters, emit func(model.TransactionExportRow) error) error {
+	f.lastUserID = userID
+	f.lastFilters = filters
+	if f.err != nil {
+		return f.err
+	}
+	for _, row := range f.exportRows {
+		if err := emit(row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *fakeTransactionService) PreviewImport(ctx context.Context, userID uuid.UUID, r io.Reader) (*model.ImportResult, error) {
+	f.lastUserID = userID
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.importResult != nil {
+		return f.importResult, nil
+	}
+	return &model.ImportResult{Errors: []model.ImportRowError{}, Preview: []model.ImportPreviewRow{}}, nil
+}
+
+func (f *fakeTransactionService) ImportTransactions(ctx context.Context, userID uuid.UUID, r io.Reader) (*model.ImportResult, error) {
+	f.lastUserID = userID
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.importResult != nil {
+		return f.importResult, nil
+	}
+	return &model.ImportResult{Errors: []model.ImportRowError{}, Preview: []model.ImportPreviewRow{}}, nil
+}
+
+func (f *fakeTransactionService) DeleteTransaction(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
+	f.lastUserID = userID
 	f.lastID = id
 	return f.err
 }
@@ -177,7 +221,7 @@ func (f *fakeTransactionService) GetDashboardSummary(ctx context.Context, userID
 }
 
 func newTestHandler(accounts *fakeAccountService, categories *fakeCategoryService, transactions *fakeTransactionService, origins []string) http.Handler {
-	return httpserver.NewHandler(service.NewHealth(nil), nil, accounts, categories, transactions, testJWTSecret, origins)
+	return httpserver.NewHandler(service.NewHealth(nil), nil, accounts, categories, transactions, nil, testJWTSecret, origins)
 }
 
 func signToken(t *testing.T, secret string, userID uuid.UUID) string {
@@ -336,6 +380,9 @@ func TestUpdateAccount(t *testing.T) {
 	if accounts.lastID != accountID {
 		t.Fatalf("expected account id %s, got %s", accountID, accounts.lastID)
 	}
+	if accounts.lastUserID != userID {
+		t.Fatalf("expected caller %s forwarded to UpdateAccount, got %s", userID, accounts.lastUserID)
+	}
 	if accounts.lastUpdate.Name == nil || *accounts.lastUpdate.Name != "Updated" {
 		t.Fatalf("expected name %q, got %v", "Updated", accounts.lastUpdate.Name)
 	}
@@ -355,6 +402,9 @@ func TestDeleteAccount(t *testing.T) {
 	}
 	if accounts.lastID != accountID {
 		t.Fatalf("expected account id %s, got %s", accountID, accounts.lastID)
+	}
+	if accounts.lastUserID != userID {
+		t.Fatalf("expected caller %s forwarded to DeleteAccount, got %s", userID, accounts.lastUserID)
 	}
 }
 
@@ -423,6 +473,9 @@ func TestDeleteCategory(t *testing.T) {
 	}
 	if categories.lastID != categoryID {
 		t.Fatalf("expected category id %s, got %s", categoryID, categories.lastID)
+	}
+	if categories.lastUserID != userID {
+		t.Fatalf("expected caller %s forwarded to DeleteCategory, got %s", userID, categories.lastUserID)
 	}
 }
 
@@ -525,6 +578,128 @@ func TestCreateTransaction(t *testing.T) {
 	}
 }
 
+func doMultipartRequest(t *testing.T, handler http.Handler, path, token, csvBody string, confirm bool) *httptest.ResponseRecorder {
+	t.Helper()
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	part, err := writer.CreateFormFile("file", "transactions.csv")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := part.Write([]byte(csvBody)); err != nil {
+		t.Fatalf("write csv body: %v", err)
+	}
+	if confirm {
+		if err := writer.WriteField("confirm", "true"); err != nil {
+			t.Fatalf("write confirm field: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, path, body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func TestPreviewImportTransactions(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	transactions := &fakeTransactionService{
+		importResult: &model.ImportResult{
+			Total:   1,
+			Valid:   1,
+			Invalid: 0,
+			Errors:  []model.ImportRowError{},
+			Preview: []model.ImportPreviewRow{{Row: 2, Date: "2026-10-01", Type: "expense", Amount: 12.5, Account: "Cash", Category: "Food"}},
+		},
+	}
+	handler := newTestHandler(&fakeAccountService{}, &fakeCategoryService{}, transactions, nil)
+
+	recorder := doMultipartRequest(t, handler, "/api/transactions/import/preview", signToken(t, testJWTSecret, userID),
+		"date,type,amount,description,account,category\n2026-10-01,expense,12.50,Coffee,Cash,Food\n", false)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+
+	var result model.ImportResult
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if result.Valid != 1 || len(result.Preview) != 1 {
+		t.Fatalf("unexpected import preview: %+v", result)
+	}
+	if transactions.lastUserID != userID {
+		t.Fatalf("expected caller %s forwarded, got %s", userID, transactions.lastUserID)
+	}
+}
+
+func TestImportTransactionsRequiresConfirm(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	handler := newTestHandler(&fakeAccountService{}, &fakeCategoryService{}, &fakeTransactionService{}, nil)
+
+	recorder := doMultipartRequest(t, handler, "/api/transactions/import", signToken(t, testJWTSecret, userID),
+		"date,type,amount,description,account,category\n", false)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400 without confirm, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestExportTransactions(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	transactions := &fakeTransactionService{
+		exportRows: []model.TransactionExportRow{
+			{
+				Date:         time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC),
+				Type:         "expense",
+				Amount:       12.5,
+				Description:  "Coffee, with milk",
+				AccountName:  "Cash",
+				CategoryName: "Food",
+			},
+		},
+	}
+	handler := newTestHandler(&fakeAccountService{}, &fakeCategoryService{}, transactions, nil)
+
+	recorder := doRequest(t, handler, http.MethodGet, "/api/transactions/export.csv?type=expense", signToken(t, testJWTSecret, userID), "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+	if contentType := recorder.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "text/csv") {
+		t.Fatalf("expected text/csv content type, got %q", contentType)
+	}
+	if disposition := recorder.Header().Get("Content-Disposition"); !strings.Contains(disposition, "transactions-") {
+		t.Fatalf("expected attachment filename, got %q", disposition)
+	}
+
+	want := "date,type,amount,description,account,category\n2026-10-01,expense,12.50,\"Coffee, with milk\",Cash,Food\n"
+	if recorder.Body.String() != want {
+		t.Fatalf("unexpected csv body:\nwant %q\ngot  %q", want, recorder.Body.String())
+	}
+	if transactions.lastUserID != userID {
+		t.Fatalf("expected caller %s forwarded, got %s", userID, transactions.lastUserID)
+	}
+	if transactions.lastFilters.Type != "expense" {
+		t.Fatalf("expected type filter %q, got %q", "expense", transactions.lastFilters.Type)
+	}
+}
+
 func TestDeleteTransaction(t *testing.T) {
 	t.Parallel()
 
@@ -539,6 +714,9 @@ func TestDeleteTransaction(t *testing.T) {
 	}
 	if transactions.lastID != transactionID {
 		t.Fatalf("expected transaction id %s, got %s", transactionID, transactions.lastID)
+	}
+	if transactions.lastUserID != userID {
+		t.Fatalf("expected caller %s forwarded to DeleteTransaction, got %s", userID, transactions.lastUserID)
 	}
 }
 

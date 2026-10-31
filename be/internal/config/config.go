@@ -16,6 +16,12 @@ type Config struct {
 	SMTPPassword string
 	SMTPFrom     string
 	FrontendURL  string
+
+	LLMBaseURL        string
+	LLMModel          string
+	LLMAPIKey         string
+	LLMTimeoutSeconds int
+	LLMMaxTokens      int
 }
 
 func Load() (*Config, error) {
@@ -37,6 +43,16 @@ func Load() (*Config, error) {
 		smtpPort = 587
 	}
 
+	llmTimeout, err := strconv.Atoi(getEnv("LLM_TIMEOUT_SECONDS", "60"))
+	if err != nil || llmTimeout <= 0 {
+		llmTimeout = 60
+	}
+
+	llmMaxTokens, err := strconv.Atoi(getEnv("LLM_MAX_TOKENS", "1024"))
+	if err != nil || llmMaxTokens <= 0 {
+		llmMaxTokens = 1024
+	}
+
 	cfg := &Config{
 		DatabaseURL:  databaseURL,
 		Port:         port,
@@ -47,6 +63,12 @@ func Load() (*Config, error) {
 		SMTPPassword: os.Getenv("SMTP_PASSWORD"),
 		SMTPFrom:     getEnv("SMTP_FROM", "noreply@goskeleton.local"),
 		FrontendURL:  getEnv("FRONTEND_URL", "http://localhost:3000"),
+
+		LLMBaseURL:        getEnv("LLM_BASE_URL", "https://api.cfrouter.com/v1"),
+		LLMModel:          getEnv("LLM_MODEL", "deepseek-v4.1-flash-1017"),
+		LLMAPIKey:         os.Getenv("LLM_API_KEY"),
+		LLMTimeoutSeconds: llmTimeout,
+		LLMMaxTokens:      llmMaxTokens,
 	}
 
 	return cfg, nil

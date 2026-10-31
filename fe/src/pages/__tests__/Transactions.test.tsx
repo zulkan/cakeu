@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
@@ -6,7 +6,13 @@ import Transactions from '../Transactions';
 import { useAccountStore } from '../../stores/accountStore';
 import { useCategoryStore } from '../../stores/categoryStore';
 import { useTransactionStore } from '../../stores/transactionStore';
-import type { Account, Category, Transaction } from '../../types';
+import { api } from '../../lib/api';
+import type {
+  Account,
+  Category,
+  ImportResult,
+  Transaction,
+} from '../../types';
 
 const account: Account = {
   id: 'account-1',
@@ -54,6 +60,55 @@ function renderTransactions() {
   );
 }
 
+function stubObjectUrls() {
+  const createObjectURL = vi.fn(() => 'blob:transactions');
+  const revokeObjectURL = vi.fn();
+  const target = URL as unknown as Record<string, unknown>;
+  target.createObjectURL = createObjectURL;
+  target.revokeObjectURL = revokeObjectURL;
+  return { createObjectURL, revokeObjectURL };
+}
+
+const importPreview: ImportResult = {
+  total: 3,
+  valid: 2,
+  invalid: 1,
+  errors: [{ row: 4, message: 'unknown account "Cash"' }],
+  preview: [
+    {
+      row: 2,
+      date: '2026-10-01',
+      type: 'expense',
+      amount: 12.5,
+      description: 'Coffee',
+      account: account.name,
+      category: expenseCategory.name,
+    },
+    {
+      row: 3,
+      date: '2026-10-02',
+      type: 'income',
+      amount: 500,
+      description: 'Salary',
+      account: account.name,
+      category: incomeCategory.name,
+    },
+  ],
+};
+
+function csvFile() {
+  return new File(['date,type,amount\n'], 'transactions.csv', {
+    type: 'text/csv',
+  });
+}
+
+async function openImportDialog() {
+  const user = userEvent.setup();
+  renderTransactions();
+  await user.click(screen.getByRole('button', { name: /import csv/i }));
+  return { user, dialog: screen.getByRole('dialog') };
+}
+
 describe('Transactions page', () => {
   beforeEach(() => {
     useAccountStore.setState({
@@ -79,6 +134,13 @@ describe('Transactions page', () => {
       createTransaction: vi.fn(async () => undefined),
       deleteTransaction: vi.fn(async () => undefined),
     });
+  });
+
+  afterEach(() => {
+    const target = URL as unknown as Record<string, unknown>;
+    delete target.createObjectURL;
+    delete target.revokeObjectURL;
+    vi.restoreAllMocks();
   });
 
   it('renders the transaction list with amount and type', () => {
@@ -238,5 +300,104 @@ describe('Transactions page', () => {
       'Could not load transactions'
     );
     expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument();
+  });
+
+  it('exports the filtered transactions as a CSV download', async () => {
+    const user = userEvent.setup();
+    const blob = new Blob(['date,type,amount\n'], { type: 'text/csv' });
+    const exportCsv = vi
+      .spyOn(api, 'exportTransactionsCsv')
+      .mockResolvedValue(blob);
+    const { createObjectURL, revokeObjectURL } = stubObjectUrls();
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(() => undefined);
+
+    useTransactionStore.setState({
+      filters: { account_id: account.id, type: 'expense', page: 2 },
+    });
+    renderTransactions();
+
+    await user.click(screen.getByRole('button', { name: /export csv/i }));
+
+    await waitFor(() => {
+      expect(exportCsv).toHaveBeenCalledWith(
+        expect.objectContaining({ account_id: account.id, type: 'expense' })
+      );
+    });
+    expect(createObjectURL).toHaveBeenCalledWith(blob);
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:transactions');
+  });
+
+  it('previews a CSV import with counts, rows, and row errors', async () => {
+    vi.spyOn(api, 'previewImport').mockResolvedValue(importPreview);
+    const { user, dialog } = await openImportDialog();
+    const file = csvFile();
+
+    await user.upload(within(dialog).getByLabelText(/csv file/i), file);
+
+    await waitFor(() => expect(api.previewImport).toHaveBeenCalledWith(file));
+
+    const summary = await within(dialog).findByLabelText('Import summary');
+    expect(within(summary).getByText('3')).toBeInTheDocument();
+    expect(within(summary).getByText('2')).toBeInTheDocument();
+    expect(within(summary).getByText('1')).toBeInTheDocument();
+    expect(within(dialog).getByText('Row 4')).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(/unknown account "Cash"/)
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText('Coffee')).toBeInTheDocument();
+  });
+
+  it('keeps the commit button disabled when no rows are valid', async () => {
+    vi.spyOn(api, 'previewImport').mockResolvedValue({
+      total: 1,
+      valid: 0,
+      invalid: 1,
+      errors: [{ row: 2, message: 'invalid amount "x"' }],
+      preview: [],
+    });
+    const { user, dialog } = await openImportDialog();
+
+    await user.upload(within(dialog).getByLabelText(/csv file/i), csvFile());
+
+    const commit = await within(dialog).findByRole('button', {
+      name: /import transactions/i,
+    });
+    expect(commit).toBeDisabled();
+  });
+
+  it('commits a valid import, reports success, and refreshes the list', async () => {
+    vi.spyOn(api, 'previewImport').mockResolvedValue(importPreview);
+    const importCsv = vi.spyOn(api, 'importTransactions').mockResolvedValue({
+      total: 2,
+      valid: 2,
+      invalid: 0,
+      errors: [],
+      preview: [],
+    });
+    const { user, dialog } = await openImportDialog();
+    const file = csvFile();
+
+    await user.upload(within(dialog).getByLabelText(/csv file/i), file);
+    await within(dialog).findByLabelText('Import summary');
+
+    const fetchTransactions = vi.mocked(
+      useTransactionStore.getState().fetchTransactions
+    );
+    fetchTransactions.mockClear();
+
+    const commit = within(dialog).getByRole('button', {
+      name: /import transactions/i,
+    });
+    await waitFor(() => expect(commit).toBeEnabled());
+    await user.click(commit);
+
+    await waitFor(() => expect(importCsv).toHaveBeenCalledWith(file));
+    expect(
+      await within(dialog).findByText(/imported 2 of 2 transactions/i)
+    ).toBeInTheDocument();
+    expect(fetchTransactions).toHaveBeenCalled();
   });
 });

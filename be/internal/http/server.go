@@ -32,7 +32,7 @@ type AuthService interface {
 // @host localhost:8080
 // @BasePath /
 // @schemes http
-func NewHandler(health HealthChecker, auth AuthService, accounts AccountService, categories CategoryService, transactions TransactionService, jwtSecret string, allowedOrigins []string) http.Handler {
+func NewHandler(health HealthChecker, auth AuthService, accounts AccountService, categories CategoryService, transactions TransactionService, chat ChatService, jwtSecret string, allowedOrigins []string) http.Handler {
 	mux := http.NewServeMux()
 
 	// Health endpoint (local only)
@@ -69,10 +69,18 @@ func NewHandler(health HealthChecker, auth AuthService, accounts AccountService,
 	apiMux.HandleFunc("DELETE /api/categories/{id}", handleDeleteCategory(categories))
 
 	apiMux.HandleFunc("GET /api/transactions", handleListTransactions(transactions))
+	apiMux.HandleFunc("GET /api/transactions/export.csv", handleExportTransactions(transactions))
+	apiMux.HandleFunc("POST /api/transactions/import/preview", handlePreviewImportTransactions(transactions))
+	apiMux.HandleFunc("POST /api/transactions/import", handleImportTransactions(transactions))
 	apiMux.HandleFunc("POST /api/transactions", handleCreateTransaction(transactions))
 	apiMux.HandleFunc("DELETE /api/transactions/{id}", handleDeleteTransaction(transactions))
 
 	apiMux.HandleFunc("GET /api/dashboard/summary", handleGetDashboardSummary(transactions))
+
+	chatLimiter := newRateLimiter(20, time.Minute)
+	apiMux.HandleFunc("POST /api/chat", handleChat(chat, chatLimiter))
+	apiMux.HandleFunc("POST /api/chat/actions/{id}/confirm", handleChatConfirm(chat))
+	apiMux.HandleFunc("POST /api/chat/actions/{id}/cancel", handleChatCancel(chat))
 
 	mux.Handle("/api/", JWTAuth(jwtSecret)(apiMux))
 

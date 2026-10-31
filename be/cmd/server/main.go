@@ -17,6 +17,7 @@ import (
 	appconfig "goskeleton/internal/config"
 	"goskeleton/internal/db"
 	httpserver "goskeleton/internal/http"
+	"goskeleton/internal/llm"
 	"goskeleton/internal/logging"
 	"goskeleton/internal/service"
 )
@@ -83,12 +84,22 @@ func main() {
 	categoryService := service.NewCategoryService(categoryRepo)
 	transactionService := service.NewTransactionService(transactionRepo, accountRepo, categoryRepo)
 
+	llmClient := llm.NewHTTPClient(
+		cfg.LLMBaseURL,
+		cfg.LLMAPIKey,
+		cfg.LLMModel,
+		cfg.LLMMaxTokens,
+		time.Duration(cfg.LLMTimeoutSeconds)*time.Second,
+	)
+	chatService := service.NewChatService(accountService, categoryService, transactionService, llmClient, logger)
+
 	handler := httpserver.NewHandler(
 		healthService,
 		authService,
 		accountService,
 		categoryService,
 		transactionService,
+		chatService,
 		cfg.JWTSecret,
 		buildAllowedOrigins(cfg.FrontendURL),
 	)

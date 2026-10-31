@@ -10,6 +10,7 @@ import Dashboard from './pages/Dashboard';
 import Transactions from './pages/Transactions';
 import Accounts from './pages/Accounts';
 import Categories from './pages/Categories';
+import Chat from './pages/Chat';
 
 function App() {
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
@@ -58,6 +59,7 @@ function App() {
         <Route path="/transactions" element={<Transactions />} />
         <Route path="/accounts" element={<Accounts />} />
         <Route path="/categories" element={<Categories />} />
+        <Route path="/chat" element={<Chat />} />
       </Route>
 
       <Route path="*" element={<Navigate to="/" replace />} />

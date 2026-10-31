@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ type fakeAccountRepo struct {
 	createErr  error
 	updateErr  error
 	deleteErr  error
+	deleted    []uuid.UUID
 	lastCreate struct {
 		userID   uuid.UUID
 		name     string
@@ -62,7 +64,7 @@ func (f *fakeAccountRepo) ListByUser(ctx context.Context, userID uuid.UUID) ([]m
 	return f.accounts, nil
 }
 
-func (f *fakeAccountRepo) Update(ctx context.Context, id uuid.UUID, name *string, balance *float64, currency *string) (*model.Account, error) {
+func (f *fakeAccountRepo) Update(ctx context.Context, userID uuid.UUID, id uuid.UUID, name *string, balance *float64, currency *string) (*model.Account, error) {
 	f.lastUpdate.id = id
 	f.lastUpdate.name = name
 	f.lastUpdate.balance = balance
@@ -73,7 +75,8 @@ func (f *fakeAccountRepo) Update(ctx context.Context, id uuid.UUID, name *string
 	return &model.Account{ID: id, Name: "updated"}, nil
 }
 
-func (f *fakeAccountRepo) Delete(ctx context.Context, id uuid.UUID) error {
+func (f *fakeAccountRepo) Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
+	f.deleted = append(f.deleted, id)
 	return f.deleteErr
 }
 
@@ -84,6 +87,7 @@ type fakeCategoryRepo struct {
 	listErr    error
 	createErr  error
 	deleteErr  error
+	deleted    []uuid.UUID
 	lastCreate struct {
 		userID uuid.UUID
 		name   string
@@ -120,7 +124,8 @@ func (f *fakeCategoryRepo) ListByUser(ctx context.Context, userID uuid.UUID) ([]
 	return f.categories, nil
 }
 
-func (f *fakeCategoryRepo) Delete(ctx context.Context, id uuid.UUID) error {
+func (f *fakeCategoryRepo) Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
+	f.deleted = append(f.deleted, id)
 	return f.deleteErr
 }
 
@@ -136,6 +141,11 @@ type fakeTransactionRepo struct {
 	listErr     error
 	deleteErr   error
 	monthlyErr  error
+	exportErr   error
+	batchErr    error
+	exportRows  []model.TransactionExportRow
+	lastBatch   []model.Transaction
+	deleted     []uuid.UUID
 	lastFilters model.TransactionFilters
 	lastCreated model.Transaction
 }
@@ -170,7 +180,26 @@ func (f *fakeTransactionRepo) List(ctx context.Context, filters model.Transactio
 	return f.list, f.total, nil
 }
 
-func (f *fakeTransactionRepo) Delete(ctx context.Context, id uuid.UUID) error {
+func (f *fakeTransactionRepo) ForEachExportRow(ctx context.Context, filters model.TransactionFilters, emit func(model.TransactionExportRow) error) error {
+	f.lastFilters = filters
+	if f.exportErr != nil {
+		return f.exportErr
+	}
+	for _, row := range f.exportRows {
+		if err := emit(row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *fakeTransactionRepo) CreateBatch(ctx context.Context, userID uuid.UUID, transactions []model.Transaction) error {
+	f.lastBatch = transactions
+	return f.batchErr
+}
+
+func (f *fakeTransactionRepo) Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
+	f.deleted = append(f.deleted, id)
 	return f.deleteErr
 }
 
@@ -237,7 +266,7 @@ func TestAccountServiceUpdateAccountPartial(t *testing.T) {
 	id := uuid.New()
 	name := "  Savings  "
 
-	_, err := accounts.UpdateAccount(context.Background(), id, model.UpdateAccountRequest{Name: &name})
+	_, err := accounts.UpdateAccount(context.Background(), uuid.New(), id, model.UpdateAccountRequest{Name: &name})
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -262,7 +291,7 @@ func TestAccountServiceUpdateAccountRejectsEmptyName(t *testing.T) {
 	accounts := service.NewAccountService(&fakeAccountRepo{})
 	empty := ""
 
-	_, err := accounts.UpdateAccount(context.Background(), uuid.New(), model.UpdateAccountRequest{Name: &empty})
+	_, err := accounts.UpdateAccount(context.Background(), uuid.New(), uuid.New(), model.UpdateAccountRequest{Name: &empty})
 	if !errors.Is(err, service.ErrInvalidName) {
 		t.Fatalf("expected ErrInvalidName, got %v", err)
 	}
@@ -274,7 +303,7 @@ func TestAccountServiceUpdateAccountRejectsInvalidCurrency(t *testing.T) {
 	accounts := service.NewAccountService(&fakeAccountRepo{})
 	currency := "US"
 
-	_, err := accounts.UpdateAccount(context.Background(), uuid.New(), model.UpdateAccountRequest{Currency: &currency})
+	_, err := accounts.UpdateAccount(context.Background(), uuid.New(), uuid.New(), model.UpdateAccountRequest{Currency: &currency})
 	if !errors.Is(err, service.ErrInvalidCurrency) {
 		t.Fatalf("expected ErrInvalidCurrency, got %v", err)
 	}
@@ -285,7 +314,7 @@ func TestAccountServiceDeleteAccountNotFound(t *testing.T) {
 
 	accounts := service.NewAccountService(&fakeAccountRepo{deleteErr: service.ErrAccountNotFound})
 
-	err := accounts.DeleteAccount(context.Background(), uuid.New())
+	err := accounts.DeleteAccount(context.Background(), uuid.New(), uuid.New())
 	if !errors.Is(err, service.ErrAccountNotFound) {
 		t.Fatalf("expected ErrAccountNotFound, got %v", err)
 	}
@@ -507,6 +536,121 @@ func TestTransactionServiceCreateTransactionRejectsCategoryTypeMismatch(t *testi
 	}
 }
 
+func TestTransactionServiceExportTransactions(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	repo := &fakeTransactionRepo{
+		exportRows: []model.TransactionExportRow{
+			{
+				Date:         time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC),
+				Type:         "expense",
+				Amount:       12.5,
+				Description:  "Coffee",
+				AccountName:  "Cash",
+				CategoryName: "Food",
+			},
+		},
+	}
+	transactions := service.NewTransactionService(repo, &fakeAccountRepo{}, &fakeCategoryRepo{})
+
+	var exported []model.TransactionExportRow
+	err := transactions.ExportTransactions(context.Background(), userID, model.TransactionFilters{Type: " EXPENSE "}, func(row model.TransactionExportRow) error {
+		exported = append(exported, row)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(exported) != 1 || exported[0].Description != "Coffee" {
+		t.Fatalf("unexpected exported rows: %+v", exported)
+	}
+	if repo.lastFilters.UserID == nil || *repo.lastFilters.UserID != userID {
+		t.Fatalf("expected export scoped to user %s", userID)
+	}
+	if repo.lastFilters.Type != "expense" {
+		t.Fatalf("expected normalized type %q, got %q", "expense", repo.lastFilters.Type)
+	}
+}
+
+func TestTransactionServiceExportTransactionsRejectsInvalidType(t *testing.T) {
+	t.Parallel()
+
+	transactions := service.NewTransactionService(&fakeTransactionRepo{}, &fakeAccountRepo{}, &fakeCategoryRepo{})
+
+	err := transactions.ExportTransactions(context.Background(), uuid.New(), model.TransactionFilters{Type: "bogus"}, func(model.TransactionExportRow) error {
+		return nil
+	})
+	if !errors.Is(err, service.ErrInvalidType) {
+		t.Fatalf("expected ErrInvalidType, got %v", err)
+	}
+}
+
+func TestTransactionServicePreviewImportValidatesRows(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	accountID := uuid.New()
+	foodID := uuid.New()
+	accountRepo := &fakeAccountRepo{accounts: []model.Account{{ID: accountID, UserID: userID, Name: "Cash"}}}
+	categoryRepo := &fakeCategoryRepo{categories: []model.Category{{ID: foodID, UserID: userID, Name: "Food", Type: "expense"}}}
+	transactions := service.NewTransactionService(&fakeTransactionRepo{}, accountRepo, categoryRepo)
+
+	body := strings.Join([]string{
+		"date,type,amount,description,account,category",
+		"2026-10-01,expense,12.50,Coffee,Cash,Food",
+		"2026-10-02,expense,5,Unknown account,Cash,Nope",
+		"not-a-date,expense,5,Bad date,Cash,Food",
+		"2026-10-03,expense,-2,Negative,Cash,Food",
+		"2026-10-04,income,10,Salary,Cash,Food",
+	}, "\n") + "\n"
+
+	result, err := transactions.PreviewImport(context.Background(), userID, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.Total != 5 || result.Valid != 1 || result.Invalid != 4 {
+		t.Fatalf("expected total=5 valid=1 invalid=4, got %+v", result)
+	}
+	if len(result.Errors) != 4 {
+		t.Fatalf("expected 4 row errors, got %d", len(result.Errors))
+	}
+	if len(result.Preview) != 1 || result.Preview[0].Row != 2 || result.Preview[0].Amount != 12.5 {
+		t.Fatalf("unexpected preview: %+v", result.Preview)
+	}
+}
+
+func TestTransactionServiceImportTransactionsCreatesBatch(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	accountID := uuid.New()
+	foodID := uuid.New()
+	accountRepo := &fakeAccountRepo{accounts: []model.Account{{ID: accountID, UserID: userID, Name: "Cash"}}}
+	categoryRepo := &fakeCategoryRepo{categories: []model.Category{{ID: foodID, UserID: userID, Name: "Food", Type: "expense"}}}
+	repo := &fakeTransactionRepo{}
+	transactions := service.NewTransactionService(repo, accountRepo, categoryRepo)
+
+	body := "date,type,amount,description,account,category\n2026-10-01,expense,12.50,Coffee,Cash,Food\n"
+
+	result, err := transactions.ImportTransactions(context.Background(), userID, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if result.Valid != 1 {
+		t.Fatalf("expected 1 valid row, got %+v", result)
+	}
+	if len(repo.lastBatch) != 1 {
+		t.Fatalf("expected 1 transaction in batch, got %d", len(repo.lastBatch))
+	}
+	if repo.lastBatch[0].AccountID != accountID || repo.lastBatch[0].CategoryID != foodID {
+		t.Fatalf("expected batch row bound to resolved ids, got %+v", repo.lastBatch[0])
+	}
+	if repo.lastBatch[0].UserID != userID {
+		t.Fatalf("expected batch row scoped to caller %s, got %s", userID, repo.lastBatch[0].UserID)
+	}
+}
+
 func TestTransactionServiceListTransactionsNormalizesPagination(t *testing.T) {
 	t.Parallel()
 
@@ -610,7 +754,7 @@ func TestTransactionServiceDeleteTransactionNotFound(t *testing.T) {
 
 	transactions := service.NewTransactionService(&fakeTransactionRepo{deleteErr: service.ErrTransactionNotFound}, &fakeAccountRepo{}, &fakeCategoryRepo{})
 
-	err := transactions.DeleteTransaction(context.Background(), uuid.New())
+	err := transactions.DeleteTransaction(context.Background(), uuid.New(), uuid.New())
 	if !errors.Is(err, service.ErrTransactionNotFound) {
 		t.Fatalf("expected ErrTransactionNotFound, got %v", err)
 	}

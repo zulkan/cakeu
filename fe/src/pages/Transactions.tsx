@@ -1,9 +1,19 @@
 import { useEffect, useState } from 'react';
-import { ChevronLeft, ChevronRight, Plus, Receipt } from 'lucide-react';
+import {
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  Loader2,
+  Plus,
+  Receipt,
+  Upload,
+} from 'lucide-react';
 import { useAccountStore } from '../stores/accountStore';
 import { useCategoryStore } from '../stores/categoryStore';
 import { useTransactionStore } from '../stores/transactionStore';
 import type { CreateTransactionRequest, Transaction } from '../types';
+import { api } from '../lib/api';
+import { downloadBlob } from '../lib/download';
 import { PageHeader } from '../components/ui/PageHeader';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
@@ -12,6 +22,7 @@ import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { TransactionFiltersForm } from '../components/transactions/TransactionFiltersForm';
 import { TransactionFormModal } from '../components/transactions/TransactionFormModal';
 import { TransactionList } from '../components/transactions/TransactionList';
+import { ImportCsvDialog } from '../components/transactions/ImportCsvDialog';
 
 function Transactions() {
   const transactions = useTransactionStore((state) => state.transactions);
@@ -36,9 +47,12 @@ function Transactions() {
   const fetchCategories = useCategoryStore((state) => state.fetchCategories);
 
   const [modalOpen, setModalOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Transaction | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   useEffect(() => {
     void fetchAccounts();
@@ -63,6 +77,29 @@ function Transactions() {
   const handleCreate = async (data: CreateTransactionRequest) => {
     await createTransaction(data);
     await fetchAccounts();
+  };
+
+  const handleExport = async () => {
+    setIsExporting(true);
+    setExportError(null);
+
+    try {
+      const blob = await api.exportTransactionsCsv(filters);
+      const today = new Date().toISOString().slice(0, 10);
+      downloadBlob(blob, `transactions-${today}.csv`);
+    } catch (exportFailure) {
+      setExportError(
+        exportFailure instanceof Error
+          ? exportFailure.message
+          : 'Unable to export transactions'
+      );
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const handleImported = async () => {
+    await Promise.all([fetchTransactions(), fetchAccounts()]);
   };
 
   const handleDelete = async () => {
@@ -103,12 +140,39 @@ function Transactions() {
         title="Transactions"
         description="Filter, review, and record every money movement."
         action={
-          <Button onClick={() => setModalOpen(true)}>
-            <Plus className="h-4 w-4" aria-hidden="true" />
-            Add transaction
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="secondary"
+              disabled={isExporting}
+              onClick={() => void handleExport()}
+            >
+              {isExporting ? (
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <Download className="h-4 w-4" aria-hidden="true" />
+              )}
+              {isExporting ? 'Exporting…' : 'Export CSV'}
+            </Button>
+            <Button variant="secondary" onClick={() => setImportOpen(true)}>
+              <Upload className="h-4 w-4" aria-hidden="true" />
+              Import CSV
+            </Button>
+            <Button onClick={() => setModalOpen(true)}>
+              <Plus className="h-4 w-4" aria-hidden="true" />
+              Add transaction
+            </Button>
+          </div>
         }
       />
+
+      {exportError && (
+        <div
+          role="alert"
+          className="rounded-xl border border-expense/20 bg-expense-light/60 px-4 py-3 text-sm font-medium text-expense"
+        >
+          {exportError}
+        </div>
+      )}
 
       <TransactionFiltersForm
         key={[
@@ -218,6 +282,13 @@ function Transactions() {
         accounts={accounts}
         categories={categories}
         onSubmit={handleCreate}
+      />
+
+      <ImportCsvDialog
+        open={importOpen}
+        currency={currency}
+        onClose={() => setImportOpen(false)}
+        onImported={handleImported}
       />
 
       <ConfirmDialog

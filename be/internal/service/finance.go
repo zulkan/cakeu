@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -45,22 +46,24 @@ type AccountRepository interface {
 	Create(ctx context.Context, userID uuid.UUID, name string, balance float64, currency string) (*model.Account, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*model.Account, error)
 	ListByUser(ctx context.Context, userID uuid.UUID) ([]model.Account, error)
-	Update(ctx context.Context, id uuid.UUID, name *string, balance *float64, currency *string) (*model.Account, error)
-	Delete(ctx context.Context, id uuid.UUID) error
+	Update(ctx context.Context, userID uuid.UUID, id uuid.UUID, name *string, balance *float64, currency *string) (*model.Account, error)
+	Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
 }
 
 type CategoryRepository interface {
 	Create(ctx context.Context, userID uuid.UUID, name string, type_ string, color string) (*model.Category, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*model.Category, error)
 	ListByUser(ctx context.Context, userID uuid.UUID) ([]model.Category, error)
-	Delete(ctx context.Context, id uuid.UUID) error
+	Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
 }
 
 type TransactionRepository interface {
 	Create(ctx context.Context, tx model.Transaction) (*model.Transaction, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*model.Transaction, error)
 	List(ctx context.Context, filters model.TransactionFilters) ([]model.Transaction, int, error)
-	Delete(ctx context.Context, id uuid.UUID) error
+	ForEachExportRow(ctx context.Context, filters model.TransactionFilters, emit func(model.TransactionExportRow) error) error
+	CreateBatch(ctx context.Context, userID uuid.UUID, transactions []model.Transaction) error
+	Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
 	MonthlyTotals(ctx context.Context, userID uuid.UUID, month time.Time) (income float64, expense float64, err error)
 }
 
@@ -68,22 +71,25 @@ type AccountService interface {
 	CreateAccount(ctx context.Context, userID uuid.UUID, req model.CreateAccountRequest) (*model.Account, error)
 	GetAccount(ctx context.Context, id uuid.UUID) (*model.Account, error)
 	ListAccounts(ctx context.Context, userID uuid.UUID) ([]model.Account, error)
-	UpdateAccount(ctx context.Context, id uuid.UUID, req model.UpdateAccountRequest) (*model.Account, error)
-	DeleteAccount(ctx context.Context, id uuid.UUID) error
+	UpdateAccount(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.UpdateAccountRequest) (*model.Account, error)
+	DeleteAccount(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
 }
 
 type CategoryService interface {
 	CreateCategory(ctx context.Context, userID uuid.UUID, req model.CreateCategoryRequest) (*model.Category, error)
 	GetCategory(ctx context.Context, id uuid.UUID) (*model.Category, error)
 	ListCategories(ctx context.Context, userID uuid.UUID) ([]model.Category, error)
-	DeleteCategory(ctx context.Context, id uuid.UUID) error
+	DeleteCategory(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
 }
 
 type TransactionService interface {
 	CreateTransaction(ctx context.Context, userID uuid.UUID, req model.CreateTransactionRequest) (*model.Transaction, error)
 	GetTransaction(ctx context.Context, id uuid.UUID) (*model.Transaction, error)
 	ListTransactions(ctx context.Context, userID uuid.UUID, filters model.TransactionFilters) (*model.PaginatedTransactions, error)
-	DeleteTransaction(ctx context.Context, id uuid.UUID) error
+	ExportTransactions(ctx context.Context, userID uuid.UUID, filters model.TransactionFilters, emit func(model.TransactionExportRow) error) error
+	PreviewImport(ctx context.Context, userID uuid.UUID, r io.Reader) (*model.ImportResult, error)
+	ImportTransactions(ctx context.Context, userID uuid.UUID, r io.Reader) (*model.ImportResult, error)
+	DeleteTransaction(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
 	GetDashboardSummary(ctx context.Context, userID uuid.UUID) (*model.DashboardSummary, error)
 }
 
@@ -141,7 +147,7 @@ func (s *accountService) ListAccounts(ctx context.Context, userID uuid.UUID) ([]
 	return accounts, nil
 }
 
-func (s *accountService) UpdateAccount(ctx context.Context, id uuid.UUID, req model.UpdateAccountRequest) (*model.Account, error) {
+func (s *accountService) UpdateAccount(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.UpdateAccountRequest) (*model.Account, error) {
 	if req.Name != nil {
 		name := strings.TrimSpace(*req.Name)
 		if name == "" {
@@ -158,7 +164,7 @@ func (s *accountService) UpdateAccount(ctx context.Context, id uuid.UUID, req mo
 		req.Currency = &currency
 	}
 
-	account, err := s.repo.Update(ctx, id, req.Name, req.Balance, req.Currency)
+	account, err := s.repo.Update(ctx, userID, id, req.Name, req.Balance, req.Currency)
 	if err != nil {
 		if errors.Is(err, ErrAccountNotFound) {
 			return nil, ErrAccountNotFound
@@ -172,8 +178,8 @@ func (s *accountService) UpdateAccount(ctx context.Context, id uuid.UUID, req mo
 	return account, nil
 }
 
-func (s *accountService) DeleteAccount(ctx context.Context, id uuid.UUID) error {
-	if err := s.repo.Delete(ctx, id); err != nil {
+func (s *accountService) DeleteAccount(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
+	if err := s.repo.Delete(ctx, userID, id); err != nil {
 		if errors.Is(err, ErrAccountNotFound) {
 			return ErrAccountNotFound
 		}
@@ -242,8 +248,8 @@ func (s *categoryService) ListCategories(ctx context.Context, userID uuid.UUID) 
 	return categories, nil
 }
 
-func (s *categoryService) DeleteCategory(ctx context.Context, id uuid.UUID) error {
-	if err := s.repo.Delete(ctx, id); err != nil {
+func (s *categoryService) DeleteCategory(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
+	if err := s.repo.Delete(ctx, userID, id); err != nil {
 		if errors.Is(err, ErrCategoryNotFound) {
 			return ErrCategoryNotFound
 		}
@@ -371,8 +377,25 @@ func (s *transactionService) ListTransactions(ctx context.Context, userID uuid.U
 	}, nil
 }
 
-func (s *transactionService) DeleteTransaction(ctx context.Context, id uuid.UUID) error {
-	if err := s.repo.Delete(ctx, id); err != nil {
+func (s *transactionService) ExportTransactions(ctx context.Context, userID uuid.UUID, filters model.TransactionFilters, emit func(model.TransactionExportRow) error) error {
+	filters.UserID = &userID
+
+	if filters.Type != "" {
+		filters.Type = strings.ToLower(strings.TrimSpace(filters.Type))
+		if !isValidType(filters.Type) {
+			return ErrInvalidType
+		}
+	}
+
+	if err := s.repo.ForEachExportRow(ctx, filters, emit); err != nil {
+		return fmt.Errorf("export transactions: %w", err)
+	}
+
+	return nil
+}
+
+func (s *transactionService) DeleteTransaction(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
+	if err := s.repo.Delete(ctx, userID, id); err != nil {
 		if errors.Is(err, ErrTransactionNotFound) {
 			return ErrTransactionNotFound
 		}

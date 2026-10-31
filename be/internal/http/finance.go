@@ -2,9 +2,13 @@ package httpserver
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"strconv"
 	"time"
@@ -19,22 +23,25 @@ type AccountService interface {
 	CreateAccount(ctx context.Context, userID uuid.UUID, req model.CreateAccountRequest) (*model.Account, error)
 	GetAccount(ctx context.Context, id uuid.UUID) (*model.Account, error)
 	ListAccounts(ctx context.Context, userID uuid.UUID) ([]model.Account, error)
-	UpdateAccount(ctx context.Context, id uuid.UUID, req model.UpdateAccountRequest) (*model.Account, error)
-	DeleteAccount(ctx context.Context, id uuid.UUID) error
+	UpdateAccount(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.UpdateAccountRequest) (*model.Account, error)
+	DeleteAccount(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
 }
 
 type CategoryService interface {
 	CreateCategory(ctx context.Context, userID uuid.UUID, req model.CreateCategoryRequest) (*model.Category, error)
 	GetCategory(ctx context.Context, id uuid.UUID) (*model.Category, error)
 	ListCategories(ctx context.Context, userID uuid.UUID) ([]model.Category, error)
-	DeleteCategory(ctx context.Context, id uuid.UUID) error
+	DeleteCategory(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
 }
 
 type TransactionService interface {
 	CreateTransaction(ctx context.Context, userID uuid.UUID, req model.CreateTransactionRequest) (*model.Transaction, error)
 	GetTransaction(ctx context.Context, id uuid.UUID) (*model.Transaction, error)
 	ListTransactions(ctx context.Context, userID uuid.UUID, filters model.TransactionFilters) (*model.PaginatedTransactions, error)
-	DeleteTransaction(ctx context.Context, id uuid.UUID) error
+	ExportTransactions(ctx context.Context, userID uuid.UUID, filters model.TransactionFilters, emit func(model.TransactionExportRow) error) error
+	PreviewImport(ctx context.Context, userID uuid.UUID, r io.Reader) (*model.ImportResult, error)
+	ImportTransactions(ctx context.Context, userID uuid.UUID, r io.Reader) (*model.ImportResult, error)
+	DeleteTransaction(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
 	GetDashboardSummary(ctx context.Context, userID uuid.UUID) (*model.DashboardSummary, error)
 }
 
@@ -120,6 +127,12 @@ func handleCreateAccount(accounts AccountService) http.HandlerFunc {
 // @Router /api/accounts/{id} [patch]
 func handleUpdateAccount(accounts AccountService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		userID, err := userIDFromContext(r.Context())
+		if err != nil {
+			respondError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
 		id, ok := parseUUIDPath(w, r, "id")
 		if !ok {
 			return
@@ -131,7 +144,7 @@ func handleUpdateAccount(accounts AccountService) http.HandlerFunc {
 			return
 		}
 
-		account, err := accounts.UpdateAccount(r.Context(), id, req)
+		account, err := accounts.UpdateAccount(r.Context(), userID, id, req)
 		if err != nil {
 			respondServiceError(w, err)
 			return
@@ -153,12 +166,18 @@ func handleUpdateAccount(accounts AccountService) http.HandlerFunc {
 // @Router /api/accounts/{id} [delete]
 func handleDeleteAccount(accounts AccountService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		userID, err := userIDFromContext(r.Context())
+		if err != nil {
+			respondError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
 		id, ok := parseUUIDPath(w, r, "id")
 		if !ok {
 			return
 		}
 
-		if err := accounts.DeleteAccount(r.Context(), id); err != nil {
+		if err := accounts.DeleteAccount(r.Context(), userID, id); err != nil {
 			respondServiceError(w, err)
 			return
 		}
@@ -244,12 +263,18 @@ func handleCreateCategory(categories CategoryService) http.HandlerFunc {
 // @Router /api/categories/{id} [delete]
 func handleDeleteCategory(categories CategoryService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		userID, err := userIDFromContext(r.Context())
+		if err != nil {
+			respondError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
 		id, ok := parseUUIDPath(w, r, "id")
 		if !ok {
 			return
 		}
 
-		if err := categories.DeleteCategory(r.Context(), id); err != nil {
+		if err := categories.DeleteCategory(r.Context(), userID, id); err != nil {
 			respondServiceError(w, err)
 			return
 		}
@@ -312,6 +337,121 @@ func handleListTransactions(transactions TransactionService) http.HandlerFunc {
 // @Failure 401 {object} model.ErrorResponse
 // @Failure 404 {object} model.ErrorResponse
 // @Router /api/transactions [post]
+func handleExportTransactions(transactions TransactionService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, err := userIDFromContext(r.Context())
+		if err != nil {
+			respondError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		filters, err := parseTransactionFilters(r)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set(
+			"Content-Disposition",
+			fmt.Sprintf(`attachment; filename="transactions-%s.csv"`, time.Now().UTC().Format("2006-01-02")),
+		)
+
+		writer := csv.NewWriter(w)
+		if err := writer.Write([]string{"date", "type", "amount", "description", "account", "category"}); err != nil {
+			return
+		}
+
+		err = transactions.ExportTransactions(r.Context(), userID, filters, func(row model.TransactionExportRow) error {
+			return writer.Write([]string{
+				row.Date.Format("2006-01-02"),
+				row.Type,
+				strconv.FormatFloat(row.Amount, 'f', 2, 64),
+				row.Description,
+				row.AccountName,
+				row.CategoryName,
+			})
+		})
+		writer.Flush()
+
+		if err != nil {
+			slog.ErrorContext(r.Context(), "export transactions", "error", err)
+		}
+	}
+}
+
+const maxImportBytes = 5 << 20
+
+func parseImportUpload(w http.ResponseWriter, r *http.Request) (multipart.File, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxImportBytes)
+
+	if err := r.ParseMultipartForm(maxImportBytes); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid multipart form or file too large")
+		return nil, false
+	}
+
+	file, _, err := r.FormFile("file")
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "file is required")
+		return nil, false
+	}
+
+	return file, true
+}
+
+func handlePreviewImportTransactions(transactions TransactionService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, err := userIDFromContext(r.Context())
+		if err != nil {
+			respondError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		file, ok := parseImportUpload(w, r)
+		if !ok {
+			return
+		}
+		defer file.Close()
+
+		result, err := transactions.PreviewImport(r.Context(), userID, file)
+		if err != nil {
+			respondServiceError(w, err)
+			return
+		}
+
+		respondJSON(w, http.StatusOK, result)
+	}
+}
+
+func handleImportTransactions(transactions TransactionService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, err := userIDFromContext(r.Context())
+		if err != nil {
+			respondError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		file, ok := parseImportUpload(w, r)
+		if !ok {
+			return
+		}
+		defer file.Close()
+
+		if r.FormValue("confirm") != "true" {
+			respondError(w, http.StatusBadRequest, "confirm=true is required")
+			return
+		}
+
+		result, err := transactions.ImportTransactions(r.Context(), userID, file)
+		if err != nil {
+			respondServiceError(w, err)
+			return
+		}
+
+		respondJSON(w, http.StatusOK, result)
+	}
+}
+
 func handleCreateTransaction(transactions TransactionService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID, err := userIDFromContext(r.Context())
@@ -348,12 +488,18 @@ func handleCreateTransaction(transactions TransactionService) http.HandlerFunc {
 // @Router /api/transactions/{id} [delete]
 func handleDeleteTransaction(transactions TransactionService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		userID, err := userIDFromContext(r.Context())
+		if err != nil {
+			respondError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
 		id, ok := parseUUIDPath(w, r, "id")
 		if !ok {
 			return
 		}
 
-		if err := transactions.DeleteTransaction(r.Context(), id); err != nil {
+		if err := transactions.DeleteTransaction(r.Context(), userID, id); err != nil {
 			respondServiceError(w, err)
 			return
 		}
@@ -479,7 +625,8 @@ func respondServiceError(w http.ResponseWriter, err error) {
 	case errors.Is(err, service.ErrInvalidAmount),
 		errors.Is(err, service.ErrInvalidType),
 		errors.Is(err, service.ErrInvalidName),
-		errors.Is(err, service.ErrInvalidCurrency):
+		errors.Is(err, service.ErrInvalidCurrency),
+		errors.Is(err, service.ErrImportTooManyRows):
 		respondError(w, http.StatusBadRequest, err.Error())
 	default:
 		respondError(w, http.StatusInternalServerError, "internal server error")

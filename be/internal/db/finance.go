@@ -99,19 +99,19 @@ func (r *AccountRepo) ListByUser(ctx context.Context, userID uuid.UUID) ([]model
 	return accounts, nil
 }
 
-func (r *AccountRepo) Update(ctx context.Context, id uuid.UUID, name *string, balance *float64, currency *string) (*model.Account, error) {
+func (r *AccountRepo) Update(ctx context.Context, userID uuid.UUID, id uuid.UUID, name *string, balance *float64, currency *string) (*model.Account, error) {
 	query := `
 		UPDATE accounts
-		SET name = COALESCE($2::varchar, name),
-		    balance = COALESCE($3::numeric, balance),
-		    currency = COALESCE($4::varchar, currency),
+		SET name = COALESCE($3::varchar, name),
+		    balance = COALESCE($4::numeric, balance),
+		    currency = COALESCE($5::varchar, currency),
 		    updated_at = NOW()
-		WHERE id = $1
+		WHERE id = $1 AND user_id = $2
 		RETURNING id, user_id, name, balance, currency, created_at, updated_at
 	`
 
 	var account model.Account
-	err := r.pool.QueryRow(ctx, query, id, name, balance, currency).Scan(
+	err := r.pool.QueryRow(ctx, query, id, userID, name, balance, currency).Scan(
 		&account.ID, &account.UserID, &account.Name, &account.Balance, &account.Currency, &account.CreatedAt, &account.UpdatedAt,
 	)
 	if err != nil {
@@ -127,8 +127,8 @@ func (r *AccountRepo) Update(ctx context.Context, id uuid.UUID, name *string, ba
 	return &account, nil
 }
 
-func (r *AccountRepo) Delete(ctx context.Context, id uuid.UUID) error {
-	tag, err := r.pool.Exec(ctx, `DELETE FROM accounts WHERE id = $1`, id)
+func (r *AccountRepo) Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
+	tag, err := r.pool.Exec(ctx, `DELETE FROM accounts WHERE id = $1 AND user_id = $2`, id, userID)
 	if err != nil {
 		return fmt.Errorf("delete account: %w", err)
 	}
@@ -216,8 +216,8 @@ func (r *CategoryRepo) ListByUser(ctx context.Context, userID uuid.UUID) ([]mode
 	return categories, nil
 }
 
-func (r *CategoryRepo) Delete(ctx context.Context, id uuid.UUID) error {
-	tag, err := r.pool.Exec(ctx, `DELETE FROM categories WHERE id = $1`, id)
+func (r *CategoryRepo) Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
+	tag, err := r.pool.Exec(ctx, `DELETE FROM categories WHERE id = $1 AND user_id = $2`, id, userID)
 	if err != nil {
 		return fmt.Errorf("delete category: %w", err)
 	}
@@ -434,7 +434,120 @@ func (r *TransactionRepo) List(ctx context.Context, filters model.TransactionFil
 	return transactions, total, nil
 }
 
-func (r *TransactionRepo) Delete(ctx context.Context, id uuid.UUID) error {
+func (r *TransactionRepo) ForEachExportRow(ctx context.Context, filters model.TransactionFilters, emit func(model.TransactionExportRow) error) error {
+	conditions := make([]string, 0, 6)
+	args := make([]interface{}, 0, 6)
+
+	addCondition := func(format string, value interface{}) {
+		args = append(args, value)
+		conditions = append(conditions, fmt.Sprintf(format, len(args)))
+	}
+
+	if filters.UserID != nil {
+		addCondition("t.user_id = $%d", *filters.UserID)
+	}
+	if filters.AccountID != nil {
+		addCondition("t.account_id = $%d", *filters.AccountID)
+	}
+	if filters.CategoryID != nil {
+		addCondition("t.category_id = $%d", *filters.CategoryID)
+	}
+	if filters.Type != "" {
+		addCondition("t.type = $%d", filters.Type)
+	}
+	if filters.DateFrom != nil {
+		addCondition("t.date >= $%d", *filters.DateFrom)
+	}
+	if filters.DateTo != nil {
+		addCondition("t.date <= $%d", *filters.DateTo)
+	}
+
+	whereClause := ""
+	if len(conditions) > 0 {
+		whereClause = " WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	query := fmt.Sprintf(`
+		SELECT t.date, t.type, t.amount, t.description, a.name, c.name
+		FROM transactions t
+		JOIN accounts a ON a.id = t.account_id
+		JOIN categories c ON c.id = t.category_id%s
+		ORDER BY t.date ASC, t.created_at ASC`, whereClause)
+
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("query export rows: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var row model.TransactionExportRow
+		if err := rows.Scan(&row.Date, &row.Type, &row.Amount, &row.Description, &row.AccountName, &row.CategoryName); err != nil {
+			return fmt.Errorf("scan export row: %w", err)
+		}
+		if err := emit(row); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate export rows: %w", err)
+	}
+
+	return nil
+}
+
+func (r *TransactionRepo) CreateBatch(ctx context.Context, userID uuid.UUID, transactions []model.Transaction) error {
+	if len(transactions) == 0 {
+		return nil
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	const insert = `
+		INSERT INTO transactions (user_id, account_id, category_id, type, amount, description, date)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`
+
+	for _, transaction := range transactions {
+		if _, err := tx.Exec(ctx, insert,
+			userID,
+			transaction.AccountID,
+			transaction.CategoryID,
+			transaction.Type,
+			transaction.Amount,
+			transaction.Description,
+			transaction.Date,
+		); err != nil {
+			return fmt.Errorf("insert transaction: %w", err)
+		}
+
+		delta := transaction.Amount
+		if transaction.Type == service.TypeExpense {
+			delta = -delta
+		}
+
+		if _, err := tx.Exec(ctx,
+			`UPDATE accounts SET balance = balance + $2, updated_at = NOW() WHERE id = $1 AND user_id = $3`,
+			transaction.AccountID, delta, userID,
+		); err != nil {
+			return fmt.Errorf("update account balance: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit batch: %w", err)
+	}
+
+	return nil
+}
+
+func (r *TransactionRepo) Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
@@ -449,8 +562,8 @@ func (r *TransactionRepo) Delete(ctx context.Context, id uuid.UUID) error {
 		amount          float64
 	)
 	err = tx.QueryRow(ctx,
-		`SELECT account_id, type, amount FROM transactions WHERE id = $1 FOR UPDATE`,
-		id,
+		`SELECT account_id, type, amount FROM transactions WHERE id = $1 AND user_id = $2 FOR UPDATE`,
+		id, userID,
 	).Scan(&accountID, &transactionType, &amount)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -459,7 +572,7 @@ func (r *TransactionRepo) Delete(ctx context.Context, id uuid.UUID) error {
 		return fmt.Errorf("select transaction: %w", err)
 	}
 
-	if _, err := tx.Exec(ctx, `DELETE FROM transactions WHERE id = $1`, id); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM transactions WHERE id = $1 AND user_id = $2`, id, userID); err != nil {
 		return fmt.Errorf("delete transaction: %w", err)
 	}
 

@@ -72,4 +72,94 @@ describe('api client', () => {
       'account not found'
     );
   });
+
+  it('exports the filtered CSV as an authenticated blob', async () => {
+    storedToken('abc123');
+    const blob = new Blob(['date,type,amount\n'], { type: 'text/csv' });
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: '',
+      blob: async () => blob,
+    } as unknown as Response);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await api.exportTransactionsCsv({
+      account_id: 'account-1',
+      category_id: 'category-1',
+      type: 'expense',
+      date_from: '2026-01-01',
+      date_to: '2026-01-31',
+      page: 3,
+    });
+
+    expect(result).toBe(blob);
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe(
+      '/api/transactions/export.csv?account_id=account-1&category_id=category-1&type=expense&date_from=2026-01-01&date_to=2026-01-31'
+    );
+    const headers = (options as RequestInit).headers as Record<string, string>;
+    expect(headers.Authorization).toBe('Bearer abc123');
+    expect(headers['Content-Type']).toBeUndefined();
+  });
+
+  it('rejects export with the backend error message', async () => {
+    storedToken('abc123');
+    mockFetchOnce({ error: 'invalid filter' }, 400);
+
+    await expect(api.exportTransactionsCsv()).rejects.toThrow('invalid filter');
+  });
+
+  it('previews an import as multipart without a JSON content type', async () => {
+    storedToken('abc123');
+    const result = {
+      total: 1,
+      valid: 1,
+      invalid: 0,
+      errors: [],
+      preview: [],
+    };
+    const fetchMock = mockFetchOnce(result);
+    const file = new File(['date,type,amount\n'], 'rows.csv', {
+      type: 'text/csv',
+    });
+
+    await expect(api.previewImport(file)).resolves.toEqual(result);
+
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe('/api/transactions/import/preview');
+    const body = (options as RequestInit).body as FormData;
+    expect(body).toBeInstanceOf(FormData);
+    expect(body.get('file')).toBe(file);
+    expect(body.get('confirm')).toBeNull();
+    const headers = (options as RequestInit).headers as Record<string, string>;
+    expect(headers.Authorization).toBe('Bearer abc123');
+    expect(headers['Content-Type']).toBeUndefined();
+  });
+
+  it('commits an import with confirm=true', async () => {
+    storedToken('abc123');
+    const result = {
+      total: 2,
+      valid: 2,
+      invalid: 0,
+      errors: [],
+      preview: [],
+    };
+    const fetchMock = mockFetchOnce(result);
+    const file = new File(['date,type,amount\n'], 'rows.csv', {
+      type: 'text/csv',
+    });
+
+    await expect(api.importTransactions(file)).resolves.toEqual(result);
+
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe('/api/transactions/import');
+    const body = (options as RequestInit).body as FormData;
+    expect(body.get('file')).toBe(file);
+    expect(body.get('confirm')).toBe('true');
+    const headers = (options as RequestInit).headers as Record<string, string>;
+    expect(headers.Authorization).toBe('Bearer abc123');
+    expect(headers['Content-Type']).toBeUndefined();
+  });
 });
