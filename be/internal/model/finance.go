@@ -67,6 +67,8 @@ type ImportResult struct {
 	Total   int                `json:"total"`
 	Valid   int                `json:"valid"`
 	Invalid int                `json:"invalid"`
+	Sheet   string             `json:"sheet"`
+	Sheets  []string           `json:"sheets"`
 	Errors  []ImportRowError   `json:"errors"`
 	Preview []ImportPreviewRow `json:"preview"`
 }

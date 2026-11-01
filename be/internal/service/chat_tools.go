@@ -169,6 +169,14 @@ var chatTools = []llm.Tool{
 			}`),
 		},
 	},
+	{
+		Type: "function",
+		Function: llm.FunctionDef{
+			Name:        "import_attached_file",
+			Description: "Import the spreadsheet the user attached to this conversation as transactions. Requires user confirmation.",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+		},
+	},
 }
 
 func (s *ChatService) listAccounts(ctx context.Context, userID uuid.UUID) (string, string, *model.ChatPendingAction, error) {

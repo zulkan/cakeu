@@ -3,6 +3,7 @@ package httpserver_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"testing"
 
@@ -11,10 +12,12 @@ import (
 	httpserver "goskeleton/internal/http"
 	"goskeleton/internal/model"
 	"goskeleton/internal/service"
+	"goskeleton/internal/spreadsheet"
 )
 
 type fakeChatService struct {
 	response   *model.ChatResponse
+	file       *model.ChatFile
 	err        error
 	lastUserID uuid.UUID
 	lastID     string
@@ -46,6 +49,17 @@ func (f *fakeChatService) Cancel(userID uuid.UUID, id string) error {
 	f.lastUserID = userID
 	f.lastID = id
 	return f.err
+}
+
+func (f *fakeChatService) AttachFile(ctx context.Context, userID uuid.UUID, filename string, r io.Reader) (*model.ChatFile, error) {
+	f.lastUserID = userID
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.file != nil {
+		return f.file, nil
+	}
+	return &model.ChatFile{ID: "file-1", Name: filename}, nil
 }
 
 func newChatTestHandler(chat httpserver.ChatService) http.Handler {
@@ -119,6 +133,52 @@ func TestChatRequiresAuthentication(t *testing.T) {
 
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("expected status 401, got %d", recorder.Code)
+	}
+}
+
+func TestChatFileUpload(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	chat := &fakeChatService{file: &model.ChatFile{
+		ID:      "file-1",
+		Name:    "rows.csv",
+		Sheet:   "csv",
+		Rows:    1,
+		Columns: []string{"date", "type"},
+		Preview: [][]string{{"date", "type"}, {"2026-10-01", "expense"}},
+	}}
+	handler := newChatTestHandler(chat)
+
+	recorder := doMultipartRequest(t, handler, "/api/chat/files", signToken(t, testJWTSecret, userID),
+		"date,type\n2026-10-01,expense\n", false)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+
+	var file model.ChatFile
+	if err := json.Unmarshal(recorder.Body.Bytes(), &file); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if file.ID != "file-1" || file.Rows != 1 {
+		t.Fatalf("unexpected file payload: %+v", file)
+	}
+	if chat.lastUserID != userID {
+		t.Fatalf("expected caller %s forwarded, got %s", userID, chat.lastUserID)
+	}
+}
+
+func TestChatFileUploadRejectsUnsupportedFormat(t *testing.T) {
+	t.Parallel()
+
+	handler := newChatTestHandler(&fakeChatService{err: spreadsheet.ErrUnsupportedFormat})
+
+	recorder := doMultipartRequest(t, handler, "/api/chat/files", signToken(t, testJWTSecret, uuid.New()),
+		"not a spreadsheet", false)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d with body %q", recorder.Code, recorder.Body.String())
 	}
 }
 

@@ -73,6 +73,8 @@ const importPreview: ImportResult = {
   total: 3,
   valid: 2,
   invalid: 1,
+  sheet: 'Sheet1',
+  sheets: ['Sheet1'],
   errors: [{ row: 4, message: 'unknown account "Cash"' }],
   preview: [
     {
@@ -101,6 +103,38 @@ function csvFile() {
     type: 'text/csv',
   });
 }
+
+function xlsxFile() {
+  return new File(['sheet-bytes'], 'transactions.xlsx', {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+}
+
+const workbookPreview: ImportResult = {
+  ...importPreview,
+  sheet: 'January',
+  sheets: ['January', 'February', 'March'],
+};
+
+const februaryPreview: ImportResult = {
+  total: 5,
+  valid: 4,
+  invalid: 1,
+  sheet: 'February',
+  sheets: ['January', 'February', 'March'],
+  errors: [{ row: 6, message: 'invalid amount "x"' }],
+  preview: [
+    {
+      row: 2,
+      date: '2026-02-01',
+      type: 'expense',
+      amount: 9.5,
+      description: 'Lunch',
+      account: account.name,
+      category: expenseCategory.name,
+    },
+  ],
+};
 
 async function openImportDialog() {
   const user = userEvent.setup();
@@ -355,6 +389,8 @@ describe('Transactions page', () => {
       total: 1,
       valid: 0,
       invalid: 1,
+      sheet: 'Sheet1',
+      sheets: ['Sheet1'],
       errors: [{ row: 2, message: 'invalid amount "x"' }],
       preview: [],
     });
@@ -374,6 +410,8 @@ describe('Transactions page', () => {
       total: 2,
       valid: 2,
       invalid: 0,
+      sheet: 'Sheet1',
+      sheets: ['Sheet1'],
       errors: [],
       preview: [],
     });
@@ -399,5 +437,93 @@ describe('Transactions page', () => {
       await within(dialog).findByText(/imported 2 of 2 transactions/i)
     ).toBeInTheDocument();
     expect(fetchTransactions).toHaveBeenCalled();
+  });
+
+  it('accepts CSV, XLSX, and legacy XLS files', async () => {
+    const { dialog } = await openImportDialog();
+
+    const input = within(dialog).getByLabelText(/csv file/i);
+    expect(input).toHaveAttribute('accept', '.csv,.xlsx,.xls');
+    expect(
+      within(dialog).getByText(/\.xlsx, or \.xls file/i)
+    ).toBeInTheDocument();
+  });
+
+  it('defaults the sheet selector to the previewed sheet and hides it for single-sheet workbooks', async () => {
+    vi.spyOn(api, 'previewImport').mockResolvedValue(importPreview);
+    const { user, dialog } = await openImportDialog();
+
+    await user.upload(within(dialog).getByLabelText(/csv file/i), csvFile());
+    await within(dialog).findByLabelText('Import summary');
+
+    expect(within(dialog).queryByLabelText('Sheet')).not.toBeInTheDocument();
+  });
+
+  it('re-previews the workbook when a different sheet is selected', async () => {
+    vi.spyOn(api, 'previewImport')
+      .mockResolvedValueOnce(workbookPreview)
+      .mockResolvedValueOnce(februaryPreview);
+    const { user, dialog } = await openImportDialog();
+    const file = xlsxFile();
+
+    await user.upload(within(dialog).getByLabelText(/csv file/i), file);
+    await within(dialog).findByLabelText('Import summary');
+
+    const sheetSelect = within(dialog).getByLabelText('Sheet');
+    expect(sheetSelect).toHaveValue('January');
+    expect(
+      within(sheetSelect).getByRole('option', { name: 'February' })
+    ).toBeInTheDocument();
+
+    await user.selectOptions(sheetSelect, 'February');
+
+    await waitFor(() =>
+      expect(api.previewImport).toHaveBeenLastCalledWith(file, 'February')
+    );
+
+    const summary = await within(dialog).findByLabelText('Import summary');
+    await waitFor(() =>
+      expect(within(summary).getByText('5')).toBeInTheDocument()
+    );
+    expect(within(summary).getByText('4')).toBeInTheDocument();
+    expect(within(dialog).getByText('Lunch')).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Sheet')).toHaveValue('February');
+  });
+
+  it('commits the selected sheet of a multi-sheet workbook', async () => {
+    vi.spyOn(api, 'previewImport')
+      .mockResolvedValueOnce(workbookPreview)
+      .mockResolvedValueOnce(februaryPreview);
+    const importCsv = vi.spyOn(api, 'importTransactions').mockResolvedValue({
+      total: 4,
+      valid: 4,
+      invalid: 0,
+      sheet: 'February',
+      sheets: ['January', 'February', 'March'],
+      errors: [],
+      preview: [],
+    });
+    const { user, dialog } = await openImportDialog();
+    const file = xlsxFile();
+
+    await user.upload(within(dialog).getByLabelText(/csv file/i), file);
+    await within(dialog).findByLabelText('Import summary');
+    await user.selectOptions(within(dialog).getByLabelText('Sheet'), 'February');
+    await waitFor(() =>
+      expect(api.previewImport).toHaveBeenLastCalledWith(file, 'February')
+    );
+
+    const commit = within(dialog).getByRole('button', {
+      name: /import transactions/i,
+    });
+    await waitFor(() => expect(commit).toBeEnabled());
+    await user.click(commit);
+
+    await waitFor(() =>
+      expect(importCsv).toHaveBeenCalledWith(file, 'February')
+    );
+    expect(
+      await within(dialog).findByText(/imported 4 of 4 transactions/i)
+    ).toBeInTheDocument();
   });
 });

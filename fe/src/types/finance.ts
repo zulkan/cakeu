@@ -91,6 +91,8 @@ export interface ImportResult {
   total: number;
   valid: number;
   invalid: number;
+  sheet: string;
+  sheets: string[];
   errors: ImportRowError[];
   preview: ImportPreviewRow[];
 }

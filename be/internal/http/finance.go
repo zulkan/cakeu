@@ -11,12 +11,14 @@ import (
 	"mime/multipart"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
 	"goskeleton/internal/model"
 	"goskeleton/internal/service"
+	"goskeleton/internal/spreadsheet"
 )
 
 type AccountService interface {
@@ -382,21 +384,21 @@ func handleExportTransactions(transactions TransactionService) http.HandlerFunc 
 
 const maxImportBytes = 5 << 20
 
-func parseImportUpload(w http.ResponseWriter, r *http.Request) (multipart.File, bool) {
+func parseImportUpload(w http.ResponseWriter, r *http.Request) (multipart.File, string, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxImportBytes)
 
 	if err := r.ParseMultipartForm(maxImportBytes); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid multipart form or file too large")
-		return nil, false
+		return nil, "", false
 	}
 
-	file, _, err := r.FormFile("file")
+	file, header, err := r.FormFile("file")
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "file is required")
-		return nil, false
+		return nil, "", false
 	}
 
-	return file, true
+	return file, header.Filename, true
 }
 
 func handlePreviewImportTransactions(transactions TransactionService) http.HandlerFunc {
@@ -407,17 +409,33 @@ func handlePreviewImportTransactions(transactions TransactionService) http.Handl
 			return
 		}
 
-		file, ok := parseImportUpload(w, r)
+		file, filename, ok := parseImportUpload(w, r)
 		if !ok {
 			return
 		}
-		defer file.Close()
+		defer func() {
+			_ = file.Close()
+		}()
 
-		result, err := transactions.PreviewImport(r.Context(), userID, file)
+		table, sheets, err := selectImportSheet(r, file, filename)
+		if err != nil {
+			respondSpreadsheetError(w, err)
+			return
+		}
+
+		csvText, err := table.ToCSV()
+		if err != nil {
+			respondError(w, http.StatusBadRequest, "unable to read the uploaded file")
+			return
+		}
+
+		result, err := transactions.PreviewImport(r.Context(), userID, strings.NewReader(csvText))
 		if err != nil {
 			respondServiceError(w, err)
 			return
 		}
+		result.Sheet = table.Name
+		result.Sheets = sheets
 
 		respondJSON(w, http.StatusOK, result)
 	}
@@ -431,25 +449,55 @@ func handleImportTransactions(transactions TransactionService) http.HandlerFunc 
 			return
 		}
 
-		file, ok := parseImportUpload(w, r)
+		file, filename, ok := parseImportUpload(w, r)
 		if !ok {
 			return
 		}
-		defer file.Close()
+		defer func() {
+			_ = file.Close()
+		}()
 
 		if r.FormValue("confirm") != "true" {
 			respondError(w, http.StatusBadRequest, "confirm=true is required")
 			return
 		}
 
-		result, err := transactions.ImportTransactions(r.Context(), userID, file)
+		table, sheets, err := selectImportSheet(r, file, filename)
+		if err != nil {
+			respondSpreadsheetError(w, err)
+			return
+		}
+
+		csvText, err := table.ToCSV()
+		if err != nil {
+			respondError(w, http.StatusBadRequest, "unable to read the uploaded file")
+			return
+		}
+
+		result, err := transactions.ImportTransactions(r.Context(), userID, strings.NewReader(csvText))
 		if err != nil {
 			respondServiceError(w, err)
 			return
 		}
+		result.Sheet = table.Name
+		result.Sheets = sheets
 
 		respondJSON(w, http.StatusOK, result)
 	}
+}
+
+func selectImportSheet(r *http.Request, file multipart.File, filename string) (*spreadsheet.Table, []string, error) {
+	workbook, err := spreadsheet.Parse(filename, file)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	table, err := workbook.Pick(r.FormValue("sheet"))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return table, workbook.Names(), nil
 }
 
 func handleCreateTransaction(transactions TransactionService) http.HandlerFunc {

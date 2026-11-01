@@ -1,6 +1,12 @@
 import { create } from 'zustand';
 import { chatApi } from '../lib/chatApi';
-import type { ChatEntry, ChatMessage, ChatPendingAction } from '../types/chat';
+import type {
+  ChatEntry,
+  ChatFile,
+  ChatMessage,
+  ChatPendingAction,
+  ChatResponse,
+} from '../types/chat';
 
 let sequence = 0;
 
@@ -16,12 +22,29 @@ function toHistory(entries: ChatEntry[]): ChatMessage[] {
   }));
 }
 
+function sendHistory(
+  history: ChatMessage[],
+  fileId?: string,
+  sheet?: string
+): Promise<ChatResponse> {
+  if (fileId && sheet) return chatApi.send(history, fileId, sheet);
+  if (fileId) return chatApi.send(history, fileId);
+  return chatApi.send(history);
+}
+
 interface ChatState {
   entries: ChatEntry[];
   isLoading: boolean;
   isConfirming: boolean;
   error: string | null;
+  attachedFile: ChatFile | null;
+  selectedSheet: string | null;
+  isUploading: boolean;
+  uploadError: string | null;
   sendMessage: (text: string) => Promise<void>;
+  attachFile: (file: File) => Promise<void>;
+  selectSheet: (name: string) => void;
+  removeAttachment: () => void;
   confirmAction: (action: ChatPendingAction) => Promise<void>;
   cancelAction: (action: ChatPendingAction) => Promise<void>;
   clearError: () => void;
@@ -33,10 +56,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   isLoading: false,
   isConfirming: false,
   error: null,
+  attachedFile: null,
+  selectedSheet: null,
+  isUploading: false,
+  uploadError: null,
 
   sendMessage: async (text) => {
     const content = text.trim();
-    if (!content) return;
+    if (!content || get().isUploading) return;
 
     const userEntry: ChatEntry = {
       id: nextId('user'),
@@ -46,10 +73,17 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     };
 
     const history = [...get().entries, userEntry];
+    const attached = get().attachedFile;
+    const fileId = attached?.id;
+    const sheet =
+      attached && attached.sheets.length > 1
+        ? get().selectedSheet ?? undefined
+        : undefined;
+
     set({ entries: history, isLoading: true, error: null });
 
     try {
-      const response = await chatApi.send(toHistory(history));
+      const response = await sendHistory(toHistory(history), fileId, sheet);
       set((state) => ({
         entries: [
           ...state.entries,
@@ -73,6 +107,37 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       });
     }
   },
+
+  attachFile: async (file) => {
+    set({ isUploading: true, uploadError: null });
+
+    try {
+      const uploaded = await chatApi.uploadFile(file);
+      set({
+        attachedFile: uploaded,
+        selectedSheet: uploaded.sheet,
+        isUploading: false,
+      });
+    } catch (failure) {
+      set({
+        isUploading: false,
+        uploadError:
+          failure instanceof Error && failure.message
+            ? failure.message
+            : 'Unable to attach that file.',
+      });
+    }
+  },
+
+  selectSheet: (name) => set({ selectedSheet: name }),
+
+  removeAttachment: () =>
+    set({
+      attachedFile: null,
+      selectedSheet: null,
+      isUploading: false,
+      uploadError: null,
+    }),
 
   confirmAction: async (action) => {
     set({ isConfirming: true, error: null });
@@ -129,5 +194,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   clearError: () => set({ error: null }),
-  clear: () => set({ entries: [], error: null, isLoading: false }),
+  clear: () =>
+    set({
+      entries: [],
+      error: null,
+      isLoading: false,
+      attachedFile: null,
+      selectedSheet: null,
+      isUploading: false,
+      uploadError: null,
+    }),
 }));

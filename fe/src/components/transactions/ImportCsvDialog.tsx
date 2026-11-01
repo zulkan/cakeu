@@ -7,6 +7,7 @@ import { cn } from '../../lib/cn';
 import { formatCurrency, formatDate } from '../../lib/format';
 import { Modal } from '../ui/Modal';
 import { Button } from '../ui/Button';
+import { Select } from '../ui/Select';
 import { TypeBadge } from '../ui/TypeBadge';
 import { errorClass, hintClass, inputClass, labelClass } from '../ui/formStyles';
 
@@ -33,6 +34,8 @@ export function ImportCsvDialog({
   const [preview, setPreview] = useState<ImportResult | null>(null);
   const [success, setSuccess] = useState<ImportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [selectedSheet, setSelectedSheet] = useState<string | null>(null);
+  const [sheets, setSheets] = useState<string[]>([]);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [isCommitting, setIsCommitting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -44,6 +47,8 @@ export function ImportCsvDialog({
     setPreview(null);
     setSuccess(null);
     setError(null);
+    setSelectedSheet(null);
+    setSheets([]);
     setIsPreviewing(false);
     setIsCommitting(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -55,29 +60,55 @@ export function ImportCsvDialog({
     onClose();
   };
 
-  const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
-    const selected = event.target.files?.[0] ?? null;
+  const runPreview = async (target: File, sheet?: string) => {
     const currentRequest = requestId.current + 1;
     requestId.current = currentRequest;
 
-    setFile(selected);
-    setPreview(null);
-    setSuccess(null);
+    setIsPreviewing(true);
     setError(null);
 
-    if (!selected) return;
-
-    setIsPreviewing(true);
     try {
-      const result = await api.previewImport(selected);
-      if (requestId.current === currentRequest) setPreview(result);
+      const result = sheet
+        ? await api.previewImport(target, sheet)
+        : await api.previewImport(target);
+      if (requestId.current !== currentRequest) return;
+      setPreview(result);
+      setSheets(result.sheets);
+      setSelectedSheet(result.sheet);
     } catch (failure) {
       if (requestId.current === currentRequest) {
+        setPreview(null);
         setError(messageFor(failure, 'Unable to preview this file'));
       }
     } finally {
       if (requestId.current === currentRequest) setIsPreviewing(false);
     }
+  };
+
+  const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const selected = event.target.files?.[0] ?? null;
+
+    setFile(selected);
+    setPreview(null);
+    setSuccess(null);
+    setError(null);
+    setSelectedSheet(null);
+    setSheets([]);
+
+    if (!selected) {
+      requestId.current += 1;
+      setIsPreviewing(false);
+      return;
+    }
+
+    await runPreview(selected);
+  };
+
+  const handleSheetChange = async (event: ChangeEvent<HTMLSelectElement>) => {
+    const name = event.target.value;
+    setSelectedSheet(name);
+    if (!file) return;
+    await runPreview(file, name);
   };
 
   const handleCommit = async () => {
@@ -87,7 +118,10 @@ export function ImportCsvDialog({
     setError(null);
 
     try {
-      const result = await api.importTransactions(file);
+      const result =
+        selectedSheet && sheets.length > 1
+          ? await api.importTransactions(file, selectedSheet)
+          : await api.importTransactions(file);
       setSuccess(result);
       await onImported();
     } catch (failure) {
@@ -135,7 +169,7 @@ export function ImportCsvDialog({
       open={open}
       onClose={handleClose}
       title="Import transactions"
-      description="Review a CSV before adding it to your ledger."
+      description="Review a CSV or Excel workbook before adding it to your ledger."
       size="lg"
       footer={footer}
     >
@@ -171,7 +205,7 @@ export function ImportCsvDialog({
               ref={fileInputRef}
               id="import-csv-file"
               type="file"
-              accept=".csv,text/csv"
+              accept=".csv,.xlsx,.xls"
               onChange={(event) => void handleFileChange(event)}
               disabled={isPreviewing || isCommitting}
               aria-describedby="import-csv-hint"
@@ -181,10 +215,34 @@ export function ImportCsvDialog({
               )}
             />
             <p id="import-csv-hint" className={hintClass}>
-              One .csv file up to 5 MB and 5,000 rows. Required columns: date,
-              type, amount, description, account, category.
+              One .csv, .xlsx, or .xls file up to 5 MB and 5,000 rows per sheet.
+              Required columns: date, type, amount, description, account,
+              category.
             </p>
           </div>
+
+          {sheets.length > 1 && (
+            <div className="space-y-1.5">
+              <label htmlFor="import-csv-sheet" className={labelClass}>
+                Sheet
+              </label>
+              <Select
+                id="import-csv-sheet"
+                value={selectedSheet ?? sheets[0] ?? ''}
+                onChange={(event) => void handleSheetChange(event)}
+                disabled={isPreviewing || isCommitting}
+              >
+                {sheets.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </Select>
+              <p className={hintClass}>
+                This workbook has {sheets.length} sheets. Pick one to validate.
+              </p>
+            </div>
+          )}
 
           {isPreviewing && (
             <div
@@ -345,7 +403,7 @@ export function ImportCsvDialog({
           {!file && (
             <div className="flex items-center gap-2 rounded-xl bg-warm-50 px-4 py-3 text-sm text-stone-600">
               <FileUp className="h-4 w-4 text-brand-500" aria-hidden="true" />
-              Choose a CSV file to validate its rows.
+              Choose a CSV, XLSX, or XLS file to validate its rows.
             </div>
           )}
         </div>

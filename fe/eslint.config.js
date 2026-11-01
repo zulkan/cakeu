@@ -60,6 +60,7 @@ export default [
         FormData: 'readonly',
         HTMLAnchorElement: 'readonly',
         HTMLInputElement: 'readonly',
+        HTMLSelectElement: 'readonly',
         KeyboardEvent: 'readonly',
         HTMLDivElement: 'readonly',
         HTMLElement: 'readonly',

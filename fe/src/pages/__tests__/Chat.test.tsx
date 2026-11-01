@@ -4,18 +4,36 @@ import userEvent from '@testing-library/user-event';
 import Chat from '../Chat';
 import { useChatStore } from '../../stores/chatStore';
 import { chatApi } from '../../lib/chatApi';
+import type { ChatFile } from '../../types/chat';
 
 vi.mock('../../lib/chatApi', () => ({
   chatApi: {
     send: vi.fn(),
+    uploadFile: vi.fn(),
     confirm: vi.fn(),
     cancel: vi.fn(),
   },
 }));
 
+const uploadedFile = {
+  id: 'file-1',
+  name: 'budget.xlsx',
+  sheet: 'Sheet1',
+  sheets: ['Sheet1'],
+  rows: 12,
+  columns: ['date', 'amount'],
+  preview: [['2026-01-01', '12.50']],
+};
+
+const multiSheetFile = {
+  ...uploadedFile,
+  sheets: ['Sheet1', 'February', 'March'],
+};
+
 describe('Chat', () => {
   beforeEach(() => {
     vi.mocked(chatApi.send).mockReset();
+    vi.mocked(chatApi.uploadFile).mockReset();
     vi.mocked(chatApi.confirm).mockReset();
     vi.mocked(chatApi.cancel).mockReset();
     useChatStore.setState({
@@ -23,6 +41,10 @@ describe('Chat', () => {
       isLoading: false,
       isConfirming: false,
       error: null,
+      attachedFile: null,
+      selectedSheet: null,
+      isUploading: false,
+      uploadError: null,
     });
   });
 
@@ -97,5 +119,180 @@ describe('Chat', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'chat is not configured'
     );
+  });
+
+  it('uploads a spreadsheet and shows a chip', async () => {
+    const user = userEvent.setup();
+    vi.mocked(chatApi.uploadFile).mockResolvedValue(uploadedFile);
+
+    render(<Chat />);
+
+    const file = new File(['date,amount'], 'budget.xlsx', {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    await user.upload(screen.getByLabelText('Attach spreadsheet'), file);
+
+    expect(chatApi.uploadFile).toHaveBeenCalledWith(file);
+    expect(await screen.findByText('budget.xlsx')).toBeInTheDocument();
+    expect(screen.getByText(/sheet sheet1/i)).toBeInTheDocument();
+    expect(screen.getByText(/12 rows/i)).toBeInTheDocument();
+  });
+
+  it('sends the attached file id with each message until removed', async () => {
+    const user = userEvent.setup();
+    vi.mocked(chatApi.uploadFile).mockResolvedValue(uploadedFile);
+    vi.mocked(chatApi.send)
+      .mockResolvedValueOnce({
+        reply: 'Imported 12 rows.',
+        tool_calls: [],
+      })
+      .mockResolvedValueOnce({
+        reply: 'The file has 12 rows.',
+        tool_calls: [],
+      });
+
+    render(<Chat />);
+
+    await user.upload(
+      screen.getByLabelText('Attach spreadsheet'),
+      new File(['date,amount'], 'budget.xlsx')
+    );
+    await screen.findByText('budget.xlsx');
+
+    await user.type(screen.getByLabelText('Message'), 'Import this file');
+    await user.click(screen.getByRole('button', { name: /send/i }));
+
+    expect(await screen.findByText('Imported 12 rows.')).toBeInTheDocument();
+    expect(chatApi.send).toHaveBeenLastCalledWith(
+      [{ role: 'user', content: 'Import this file' }],
+      'file-1'
+    );
+
+    await user.type(screen.getByLabelText('Message'), 'How many rows?');
+    await user.click(screen.getByRole('button', { name: /send/i }));
+
+    expect(await screen.findByText('The file has 12 rows.')).toBeInTheDocument();
+    expect(chatApi.send).toHaveBeenLastCalledWith(
+      [
+        { role: 'user', content: 'Import this file' },
+        { role: 'assistant', content: 'Imported 12 rows.' },
+        { role: 'user', content: 'How many rows?' },
+      ],
+      'file-1'
+    );
+  });
+
+  it('removes the attachment and stops sending its file id', async () => {
+    const user = userEvent.setup();
+    vi.mocked(chatApi.uploadFile).mockResolvedValue(uploadedFile);
+    vi.mocked(chatApi.send).mockResolvedValue({ reply: 'Sure.', tool_calls: [] });
+
+    render(<Chat />);
+
+    await user.upload(
+      screen.getByLabelText('Attach spreadsheet'),
+      new File(['date,amount'], 'budget.xlsx')
+    );
+    await screen.findByText('budget.xlsx');
+
+    await user.click(
+      screen.getByRole('button', { name: /remove budget\.xlsx/i })
+    );
+    expect(screen.queryByText('budget.xlsx')).not.toBeInTheDocument();
+
+    await user.type(screen.getByLabelText('Message'), 'Hello');
+    await user.click(screen.getByRole('button', { name: /send/i }));
+
+    await screen.findByText('Sure.');
+    expect(chatApi.send).toHaveBeenLastCalledWith([
+      { role: 'user', content: 'Hello' },
+    ]);
+  });
+
+  it('selects a sheet for a multi-sheet upload and sends it without re-uploading', async () => {
+    const user = userEvent.setup();
+    vi.mocked(chatApi.uploadFile).mockResolvedValue(multiSheetFile);
+    vi.mocked(chatApi.send).mockResolvedValue({
+      reply: 'Ready.',
+      tool_calls: [],
+    });
+
+    render(<Chat />);
+
+    await user.upload(
+      screen.getByLabelText('Attach spreadsheet'),
+      new File(['date,amount'], 'budget.xlsx')
+    );
+    await screen.findByText('budget.xlsx');
+
+    const sheetSelect = screen.getByLabelText('Sheet');
+    expect(sheetSelect).toHaveValue('Sheet1');
+    expect(
+      screen.getByRole('option', { name: 'February' })
+    ).toBeInTheDocument();
+
+    await user.selectOptions(sheetSelect, 'February');
+    expect(chatApi.uploadFile).toHaveBeenCalledTimes(1);
+
+    await user.type(screen.getByLabelText('Message'), 'Import February');
+    await user.click(screen.getByRole('button', { name: /send/i }));
+
+    expect(await screen.findByText('Ready.')).toBeInTheDocument();
+    expect(chatApi.send).toHaveBeenLastCalledWith(
+      [{ role: 'user', content: 'Import February' }],
+      'file-1',
+      'February'
+    );
+    expect(chatApi.uploadFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not show a sheet selector for a single-sheet upload', async () => {
+    const user = userEvent.setup();
+    vi.mocked(chatApi.uploadFile).mockResolvedValue(uploadedFile);
+
+    render(<Chat />);
+
+    await user.upload(
+      screen.getByLabelText('Attach spreadsheet'),
+      new File(['date,amount'], 'budget.xlsx')
+    );
+    await screen.findByText('budget.xlsx');
+
+    expect(screen.queryByLabelText('Sheet')).not.toBeInTheDocument();
+    expect(screen.getByText(/sheet sheet1/i)).toBeInTheDocument();
+  });
+
+  it('shows upload failures inline', async () => {    const user = userEvent.setup();
+    vi.mocked(chatApi.uploadFile).mockRejectedValue(
+      new Error('file is too large')
+    );
+
+    render(<Chat />);
+
+    await user.upload(
+      screen.getByLabelText('Attach spreadsheet'),
+      new File(['date,amount'], 'budget.xlsx')
+    );
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'file is too large'
+    );
+  });
+
+  it('shows a spinner and disables send while uploading', async () => {
+    const user = userEvent.setup();
+    vi.mocked(chatApi.uploadFile).mockReturnValue(
+      new Promise<ChatFile>(() => undefined)
+    );
+
+    render(<Chat />);
+
+    await user.upload(
+      screen.getByLabelText('Attach spreadsheet'),
+      new File(['date,amount'], 'budget.xlsx')
+    );
+
+    expect(screen.getByRole('status')).toHaveTextContent(/uploading spreadsheet/i);
+    expect(screen.getByRole('button', { name: /send/i })).toBeDisabled();
   });
 });

@@ -79,6 +79,7 @@ func NewHandler(health HealthChecker, auth AuthService, accounts AccountService,
 
 	chatLimiter := newRateLimiter(20, time.Minute)
 	apiMux.HandleFunc("POST /api/chat", handleChat(chat, chatLimiter))
+	apiMux.HandleFunc("POST /api/chat/files", handleChatFileUpload(chat, chatLimiter))
 	apiMux.HandleFunc("POST /api/chat/actions/{id}/confirm", handleChatConfirm(chat))
 	apiMux.HandleFunc("POST /api/chat/actions/{id}/cancel", handleChatCancel(chat))
 

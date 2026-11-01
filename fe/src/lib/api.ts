@@ -95,10 +95,11 @@ async function requestMultipart<T>(path: string, body: FormData): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-function importForm(file: File, confirm: boolean): FormData {
+function importForm(file: File, confirm: boolean, sheet?: string): FormData {
   const form = new FormData();
   form.append('file', file);
   if (confirm) form.append('confirm', 'true');
+  if (sheet) form.append('sheet', sheet);
   return form;
 }
 
@@ -168,15 +169,15 @@ export const api = {
 
     return res.blob();
   },
-  previewImport: (file: File) =>
+  previewImport: (file: File, sheet?: string) =>
     requestMultipart<ImportResult>(
       '/transactions/import/preview',
-      importForm(file, false)
+      importForm(file, false, sheet)
     ),
-  importTransactions: (file: File) =>
+  importTransactions: (file: File, sheet?: string) =>
     requestMultipart<ImportResult>(
       '/transactions/import',
-      importForm(file, true)
+      importForm(file, true, sheet)
     ),
 
   // Dashboard

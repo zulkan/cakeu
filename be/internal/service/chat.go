@@ -31,6 +31,7 @@ const (
 	pendingDeleteTransaction = "delete_transaction"
 	pendingDeleteAccount     = "delete_account"
 	pendingDeleteCategory    = "delete_category"
+	pendingImportFile        = "import_file"
 	chatSystemPromptText     = `You are Catatku's finance assistant. You can only act through the provided tools.
 Rules:
 - Never invent amounts, dates or balances. If you need data, call a tool.
@@ -44,6 +45,8 @@ type pendingAction struct {
 	userID    uuid.UUID
 	kind      string
 	targetID  uuid.UUID
+	fileID    string
+	sheet     string
 	summary   string
 	expiresAt time.Time
 }
@@ -57,6 +60,7 @@ type ChatService struct {
 
 	mu      sync.Mutex
 	pending map[string]pendingAction
+	files   map[string]storedChatFile
 }
 
 func NewChatService(accounts AccountService, categories CategoryService, transactions TransactionService, client llm.Client, logger *slog.Logger) *ChatService {
@@ -71,11 +75,28 @@ func NewChatService(accounts AccountService, categories CategoryService, transac
 		client:       client,
 		logger:       logger,
 		pending:      make(map[string]pendingAction),
+		files:        make(map[string]storedChatFile),
 	}
 }
 
 func (s *ChatService) Handle(ctx context.Context, userID uuid.UUID, req model.ChatRequest) (*model.ChatResponse, error) {
 	messages := []llm.Message{{Role: "system", Content: chatSystemPromptText}}
+
+	fileID := strings.TrimSpace(req.FileID)
+	sheet := strings.TrimSpace(req.Sheet)
+	if fileID != "" {
+		file, ok := s.lookupFile(userID, fileID)
+		if !ok {
+			return nil, errors.New("the attached file is no longer available; ask the user to upload it again")
+		}
+
+		context, contextErr := s.fileContext(file, sheet)
+		if contextErr != nil {
+			return nil, contextErr
+		}
+		messages = append(messages, llm.Message{Role: "system", Content: context})
+	}
+
 	for _, message := range req.Messages {
 		if message.Role != "user" && message.Role != "assistant" {
 			continue
@@ -112,7 +133,7 @@ func (s *ChatService) Handle(ctx context.Context, userID uuid.UUID, req model.Ch
 		}
 
 		for _, call := range reply.ToolCalls {
-			content, summary, pending, err := s.executeTool(ctx, userID, call)
+			content, summary, pending, err := s.executeTool(ctx, userID, fileID, sheet, call)
 			if err != nil {
 				response.ToolCalls = append(response.ToolCalls, model.ChatToolCall{Name: call.Function.Name, Summary: "failed"})
 				messages = append(messages, llm.Message{Role: "tool", ToolCallID: call.ID, Content: "error: " + err.Error()})
@@ -148,12 +169,22 @@ func (s *ChatService) Confirm(ctx context.Context, userID uuid.UUID, id string) 
 		err = s.accounts.DeleteAccount(ctx, userID, action.targetID)
 	case pendingDeleteCategory:
 		err = s.categories.DeleteCategory(ctx, userID, action.targetID)
+	case pendingImportFile:
+		file, ok := s.lookupFile(userID, action.fileID)
+		if !ok {
+			return "", ErrPendingActionNotFound
+		}
+		selected, ok := file.pick(action.sheet)
+		if !ok {
+			return "", ErrPendingActionNotFound
+		}
+		_, err = s.transactions.ImportTransactions(ctx, userID, strings.NewReader(selected.csv))
 	default:
 		return "", ErrPendingActionNotFound
 	}
 
 	if err != nil {
-		return "", fmt.Errorf("confirm delete: %w", err)
+		return "", fmt.Errorf("confirm action: %w", err)
 	}
 
 	return action.summary, nil
@@ -216,7 +247,7 @@ func randomToken() string {
 	return hex.EncodeToString(buffer)
 }
 
-func (s *ChatService) executeTool(ctx context.Context, userID uuid.UUID, call llm.ToolCall) (string, string, *model.ChatPendingAction, error) {
+func (s *ChatService) executeTool(ctx context.Context, userID uuid.UUID, fileID, sheet string, call llm.ToolCall) (string, string, *model.ChatPendingAction, error) {
 	switch call.Function.Name {
 	case "list_accounts":
 		return s.listAccounts(ctx, userID)
@@ -240,6 +271,8 @@ func (s *ChatService) executeTool(ctx context.Context, userID uuid.UUID, call ll
 		return s.requestDeleteAccount(ctx, userID, call.Function.Arguments)
 	case "delete_category":
 		return s.requestDeleteCategory(ctx, userID, call.Function.Arguments)
+	case "import_attached_file":
+		return s.requestImportAttachedFile(ctx, userID, call.Function.Arguments, fileID, sheet)
 	default:
 		return "", "", nil, fmt.Errorf("unknown tool %q", call.Function.Name)
 	}

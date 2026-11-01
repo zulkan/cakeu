@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -294,6 +295,61 @@ func TestChatServiceCategoryDeleteRequiresConfirmation(t *testing.T) {
 	}
 	if len(categoryRepo.deleted) != 1 || categoryRepo.deleted[0] != categoryID {
 		t.Fatalf("expected category %s deleted once, got %+v", categoryID, categoryRepo.deleted)
+	}
+}
+
+func TestChatServiceAttachesFileAndImports(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	accountID := uuid.New()
+	categoryID := uuid.New()
+	accountRepo := &fakeAccountRepo{accounts: []model.Account{{ID: accountID, UserID: userID, Name: "Cash"}}}
+	categoryRepo := &fakeCategoryRepo{categories: []model.Category{{ID: categoryID, UserID: userID, Name: "Food", Type: "expense"}}}
+	repo := &fakeTransactionRepo{}
+
+	accounts := service.NewAccountService(accountRepo)
+	categories := service.NewCategoryService(categoryRepo)
+	transactions := service.NewTransactionService(repo, accountRepo, categoryRepo)
+
+	client := &fakeLLMClient{responses: []llm.Message{{
+		Role: "assistant",
+		ToolCalls: []llm.ToolCall{{
+			ID:       "call_import",
+			Type:     "function",
+			Function: llm.FunctionCall{Name: "import_attached_file", Arguments: "{}"},
+		}},
+	}}}
+	chat := service.NewChatService(accounts, categories, transactions, client, nil)
+
+	csvBody := "date,type,amount,description,account,category\n2026-10-01,expense,12.50,Coffee,Cash,Food\n"
+	file, err := chat.AttachFile(context.Background(), userID, "rows.csv", strings.NewReader(csvBody))
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if file.Rows != 1 || len(file.Preview) != 2 {
+		t.Fatalf("unexpected file metadata: %+v", file)
+	}
+
+	response, err := chat.Handle(context.Background(), userID, model.ChatRequest{
+		Messages: []model.ChatMessage{{Role: "user", Content: "Import this file"}},
+		FileID:   file.ID,
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if response.PendingAction == nil {
+		t.Fatalf("expected a pending import action, got %+v", response)
+	}
+	if len(repo.lastBatch) != 0 {
+		t.Fatalf("rows must not be imported before confirmation")
+	}
+
+	if _, err := chat.Confirm(context.Background(), userID, response.PendingAction.ID); err != nil {
+		t.Fatalf("expected confirm to succeed, got %v", err)
+	}
+	if len(repo.lastBatch) != 1 {
+		t.Fatalf("expected 1 imported transaction, got %d", len(repo.lastBatch))
 	}
 }
 

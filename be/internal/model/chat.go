@@ -7,6 +7,18 @@ type ChatMessage struct {
 
 type ChatRequest struct {
 	Messages []ChatMessage `json:"messages"`
+	FileID   string        `json:"file_id,omitempty"`
+	Sheet    string        `json:"sheet,omitempty"`
+}
+
+type ChatFile struct {
+	ID      string     `json:"id"`
+	Name    string     `json:"name"`
+	Sheet   string     `json:"sheet"`
+	Sheets  []string   `json:"sheets"`
+	Rows    int        `json:"rows"`
+	Columns []string   `json:"columns"`
+	Preview [][]string `json:"preview"`
 }
 
 type ChatToolCall struct {

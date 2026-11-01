@@ -78,7 +78,10 @@ Response shape:
 ```
 
 Rules:
-- Maximum upload 5 MB and 5,000 rows.
+- Maximum upload 5 MB and 5,000 rows per sheet.
+- Uploads may be `.csv`, `.xlsx` or legacy `.xls`; `internal/spreadsheet` parses every populated sheet.
+- An optional `sheet` form field selects the sheet; the response echoes `sheet` and lists `sheets`. Unknown sheet names return `400` with the available names.
+- Date cells are normalised to `YYYY-MM-DD` (XLSX via number-format detection, XLS via format strings) before validation.
 - CSV parsed with `encoding/csv` (RFC 4180); BOM stripped; header matched case-insensitively.
 - Unknown account/category is an error, never auto-created.
 - Import is transactional per request: all valid rows commit, or none do.

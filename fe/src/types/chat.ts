@@ -21,6 +21,16 @@ export interface ChatMessage {
   content: string;
 }
 
+export interface ChatFile {
+  id: string;
+  name: string;
+  sheet: string;
+  sheets: string[];
+  rows: number;
+  columns: string[];
+  preview: string[][];
+}
+
 export interface ChatEntry extends ChatMessage {
   id: string;
   toolCalls: ChatToolCall[];

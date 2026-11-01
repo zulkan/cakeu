@@ -132,9 +132,32 @@ describe('api client', () => {
     expect(body).toBeInstanceOf(FormData);
     expect(body.get('file')).toBe(file);
     expect(body.get('confirm')).toBeNull();
+    expect(body.get('sheet')).toBeNull();
     const headers = (options as RequestInit).headers as Record<string, string>;
     expect(headers.Authorization).toBe('Bearer abc123');
     expect(headers['Content-Type']).toBeUndefined();
+  });
+
+  it('appends the selected sheet when previewing a workbook', async () => {
+    storedToken('abc123');
+    const result = {
+      total: 1,
+      valid: 1,
+      invalid: 0,
+      sheet: 'February',
+      sheets: ['January', 'February'],
+      errors: [],
+      preview: [],
+    };
+    const fetchMock = mockFetchOnce(result);
+    const file = new File(['sheet-bytes'], 'rows.xlsx');
+
+    await expect(api.previewImport(file, 'February')).resolves.toEqual(result);
+
+    const body = (fetchMock.mock.calls[0][1] as RequestInit).body as FormData;
+    expect(body.get('file')).toBe(file);
+    expect(body.get('sheet')).toBe('February');
+    expect(body.get('confirm')).toBeNull();
   });
 
   it('commits an import with confirm=true', async () => {
@@ -158,8 +181,31 @@ describe('api client', () => {
     const body = (options as RequestInit).body as FormData;
     expect(body.get('file')).toBe(file);
     expect(body.get('confirm')).toBe('true');
+    expect(body.get('sheet')).toBeNull();
     const headers = (options as RequestInit).headers as Record<string, string>;
     expect(headers.Authorization).toBe('Bearer abc123');
     expect(headers['Content-Type']).toBeUndefined();
+  });
+
+  it('appends the selected sheet when committing a workbook', async () => {
+    storedToken('abc123');
+    const result = {
+      total: 1,
+      valid: 1,
+      invalid: 0,
+      sheet: 'March',
+      sheets: ['January', 'March'],
+      errors: [],
+      preview: [],
+    };
+    const fetchMock = mockFetchOnce(result);
+    const file = new File(['sheet-bytes'], 'rows.xlsx');
+
+    await expect(api.importTransactions(file, 'March')).resolves.toEqual(result);
+
+    const body = (fetchMock.mock.calls[0][1] as RequestInit).body as FormData;
+    expect(body.get('file')).toBe(file);
+    expect(body.get('confirm')).toBe('true');
+    expect(body.get('sheet')).toBe('March');
   });
 });
