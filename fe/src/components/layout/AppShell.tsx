@@ -2,10 +2,12 @@ import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import {
   ArrowLeftRight,
+  BarChart3,
   LayoutDashboard,
   LogOut,
   Menu,
   MessageSquare,
+  Repeat,
   Tags,
   Wallet,
   X,
@@ -27,6 +29,8 @@ const navItems: NavItem[] = [
   { to: '/transactions', label: 'Transactions', icon: ArrowLeftRight },
   { to: '/accounts', label: 'Accounts', icon: Wallet },
   { to: '/categories', label: 'Categories', icon: Tags },
+  { to: '/recurring', label: 'Recurring', icon: Repeat },
+  { to: '/reports', label: 'Reports', icon: BarChart3 },
   { to: '/chat', label: 'Assistant', icon: MessageSquare },
 ];
 

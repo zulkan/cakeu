@@ -59,7 +59,7 @@ func newChatService(userID uuid.UUID, client llm.Client, transactions *fakeTrans
 	}})
 	transactionsService := service.NewTransactionService(transactions, &fakeAccountRepo{}, &fakeCategoryRepo{})
 
-	return service.NewChatService(accounts, categories, transactionsService, client, nil)
+	return service.NewChatService(accounts, categories, transactionsService, nil, nil, nil, client, nil)
 }
 
 func TestChatServiceRunsToolThenReplies(t *testing.T) {
@@ -193,7 +193,7 @@ func TestChatServiceCreatesAccount(t *testing.T) {
 		},
 		{Role: "assistant", Content: "Created the Savings account."},
 	}}
-	chat := service.NewChatService(accounts, categories, transactions, client, nil)
+	chat := service.NewChatService(accounts, categories, transactions, nil, nil, nil, client, nil)
 
 	response, err := chat.Handle(context.Background(), userID, model.ChatRequest{
 		Messages: []model.ChatMessage{{Role: "user", Content: "Create a savings account with 250 USD"}},
@@ -232,7 +232,7 @@ func TestChatServiceAccountDeleteRequiresConfirmation(t *testing.T) {
 			Function: llm.FunctionCall{Name: "delete_account", Arguments: `{"account":"Cash"}`},
 		}},
 	}}}
-	chat := service.NewChatService(accounts, categories, transactions, client, nil)
+	chat := service.NewChatService(accounts, categories, transactions, nil, nil, nil, client, nil)
 
 	response, err := chat.Handle(context.Background(), userID, model.ChatRequest{
 		Messages: []model.ChatMessage{{Role: "user", Content: "Delete my Cash account"}},
@@ -275,7 +275,7 @@ func TestChatServiceCategoryDeleteRequiresConfirmation(t *testing.T) {
 			Function: llm.FunctionCall{Name: "delete_category", Arguments: `{"category":"Food","type":"expense"}`},
 		}},
 	}}}
-	chat := service.NewChatService(accounts, categories, transactions, client, nil)
+	chat := service.NewChatService(accounts, categories, transactions, nil, nil, nil, client, nil)
 
 	response, err := chat.Handle(context.Background(), userID, model.ChatRequest{
 		Messages: []model.ChatMessage{{Role: "user", Content: "Delete the Food category"}},
@@ -320,7 +320,7 @@ func TestChatServiceAttachesFileAndImports(t *testing.T) {
 			Function: llm.FunctionCall{Name: "import_attached_file", Arguments: "{}"},
 		}},
 	}}}
-	chat := service.NewChatService(accounts, categories, transactions, client, nil)
+	chat := service.NewChatService(accounts, categories, transactions, nil, nil, nil, client, nil)
 
 	csvBody := "date,type,amount,description,account,category\n2026-10-01,expense,12.50,Coffee,Cash,Food\n"
 	file, err := chat.AttachFile(context.Background(), userID, "rows.csv", strings.NewReader(csvBody))
@@ -382,5 +382,54 @@ func TestChatServiceStopsAfterIterationLimit(t *testing.T) {
 	}
 	if client.calls != 5 {
 		t.Fatalf("expected the loop to stop at 5 llm calls, got %d", client.calls)
+	}
+}
+
+type fakeBudgetService struct {
+	statuses []model.BudgetStatus
+}
+
+func (f *fakeBudgetService) List(ctx context.Context, userID uuid.UUID, month time.Time) ([]model.BudgetStatus, error) {
+	return f.statuses, nil
+}
+
+func (f *fakeBudgetService) Upsert(ctx context.Context, userID, categoryID uuid.UUID, month time.Time, amount float64) (*model.Budget, error) {
+	return &model.Budget{CategoryID: categoryID, Month: month, Amount: amount}, nil
+}
+
+func (f *fakeBudgetService) Delete(ctx context.Context, userID, categoryID uuid.UUID, month time.Time) error {
+	return nil
+}
+
+func TestChatServiceListsBudgets(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	client := &fakeLLMClient{responses: []llm.Message{
+		{
+			Role: "assistant",
+			ToolCalls: []llm.ToolCall{{
+				ID:       "call_budgets",
+				Type:     "function",
+				Function: llm.FunctionCall{Name: "list_budgets", Arguments: "{}"},
+			}},
+		},
+		{Role: "assistant", Content: "You are halfway through your Food budget."},
+	}}
+	budgets := &fakeBudgetService{statuses: []model.BudgetStatus{{CategoryName: "Food", Budget: 100, Spent: 50, Percent: 50}}}
+
+	chat := service.NewChatService(nil, nil, nil, budgets, nil, nil, client, nil)
+
+	response, err := chat.Handle(context.Background(), userID, model.ChatRequest{
+		Messages: []model.ChatMessage{{Role: "user", Content: "How are my budgets?"}},
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(response.ToolCalls) != 1 || response.ToolCalls[0].Name != "list_budgets" {
+		t.Fatalf("unexpected tool calls: %+v", response.ToolCalls)
+	}
+	if response.Reply != "You are halfway through your Food budget." {
+		t.Fatalf("unexpected reply %q", response.Reply)
 	}
 }

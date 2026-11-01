@@ -221,7 +221,7 @@ func (f *fakeTransactionService) GetDashboardSummary(ctx context.Context, userID
 }
 
 func newTestHandler(accounts *fakeAccountService, categories *fakeCategoryService, transactions *fakeTransactionService, origins []string) http.Handler {
-	return httpserver.NewHandler(service.NewHealth(nil), nil, accounts, categories, transactions, nil, testJWTSecret, origins)
+	return httpserver.NewHandler(service.NewHealth(nil), nil, accounts, categories, transactions, nil, nil, nil, nil, testJWTSecret, origins)
 }
 
 func signToken(t *testing.T, secret string, userID uuid.UUID) string {

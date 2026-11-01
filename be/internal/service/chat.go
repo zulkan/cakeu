@@ -55,6 +55,9 @@ type ChatService struct {
 	accounts     AccountService
 	categories   CategoryService
 	transactions TransactionService
+	budgets      BudgetService
+	recurring    RecurringService
+	reports      ReportService
 	client       llm.Client
 	logger       *slog.Logger
 
@@ -63,7 +66,7 @@ type ChatService struct {
 	files   map[string]storedChatFile
 }
 
-func NewChatService(accounts AccountService, categories CategoryService, transactions TransactionService, client llm.Client, logger *slog.Logger) *ChatService {
+func NewChatService(accounts AccountService, categories CategoryService, transactions TransactionService, budgets BudgetService, recurring RecurringService, reports ReportService, client llm.Client, logger *slog.Logger) *ChatService {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -72,6 +75,9 @@ func NewChatService(accounts AccountService, categories CategoryService, transac
 		accounts:     accounts,
 		categories:   categories,
 		transactions: transactions,
+		budgets:      budgets,
+		recurring:    recurring,
+		reports:      reports,
 		client:       client,
 		logger:       logger,
 		pending:      make(map[string]pendingAction),
@@ -273,6 +279,20 @@ func (s *ChatService) executeTool(ctx context.Context, userID uuid.UUID, fileID,
 		return s.requestDeleteCategory(ctx, userID, call.Function.Arguments)
 	case "import_attached_file":
 		return s.requestImportAttachedFile(ctx, userID, call.Function.Arguments, fileID, sheet)
+	case "set_budget":
+		return s.setBudget(ctx, userID, call.Function.Arguments)
+	case "list_budgets":
+		return s.listBudgets(ctx, userID, call.Function.Arguments)
+	case "create_recurring":
+		return s.createRecurring(ctx, userID, call.Function.Arguments)
+	case "list_recurring":
+		return s.listRecurring(ctx, userID, call.Function.Arguments)
+	case "pause_recurring":
+		return s.pauseRecurring(ctx, userID, call.Function.Arguments)
+	case "get_cashflow_report":
+		return s.cashflowReport(ctx, userID, call.Function.Arguments)
+	case "get_category_report":
+		return s.categoryReport(ctx, userID, call.Function.Arguments)
 	default:
 		return "", "", nil, fmt.Errorf("unknown tool %q", call.Function.Name)
 	}

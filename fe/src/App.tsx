@@ -10,6 +10,8 @@ import Dashboard from './pages/Dashboard';
 import Transactions from './pages/Transactions';
 import Accounts from './pages/Accounts';
 import Categories from './pages/Categories';
+import Recurring from './pages/Recurring';
+import Reports from './pages/Reports';
 import Chat from './pages/Chat';
 
 function App() {
@@ -59,6 +61,8 @@ function App() {
         <Route path="/transactions" element={<Transactions />} />
         <Route path="/accounts" element={<Accounts />} />
         <Route path="/categories" element={<Categories />} />
+        <Route path="/recurring" element={<Recurring />} />
+        <Route path="/reports" element={<Reports />} />
         <Route path="/chat" element={<Chat />} />
       </Route>
 

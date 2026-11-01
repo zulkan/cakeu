@@ -40,6 +40,7 @@ function mockDashboardApi() {
     '/api/dashboard/summary': { body: summary },
     '/api/accounts': { body: [account] },
     '/api/categories': { body: [category] },
+    '/api/budgets': { body: [] },
   });
 }
 
@@ -138,6 +139,8 @@ describe('App router', () => {
     expect(
       screen.getByRole('link', { name: 'Categories' })
     ).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Recurring' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Reports' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /logout/i })).toBeInTheDocument();
   });
 });

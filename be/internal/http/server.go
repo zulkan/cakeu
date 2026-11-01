@@ -32,7 +32,7 @@ type AuthService interface {
 // @host localhost:8080
 // @BasePath /
 // @schemes http
-func NewHandler(health HealthChecker, auth AuthService, accounts AccountService, categories CategoryService, transactions TransactionService, chat ChatService, jwtSecret string, allowedOrigins []string) http.Handler {
+func NewHandler(health HealthChecker, auth AuthService, accounts AccountService, categories CategoryService, transactions TransactionService, budgets BudgetService, recurring RecurringService, reports ReportService, chat ChatService, jwtSecret string, allowedOrigins []string) http.Handler {
 	mux := http.NewServeMux()
 
 	// Health endpoint (local only)
@@ -76,6 +76,20 @@ func NewHandler(health HealthChecker, auth AuthService, accounts AccountService,
 	apiMux.HandleFunc("DELETE /api/transactions/{id}", handleDeleteTransaction(transactions))
 
 	apiMux.HandleFunc("GET /api/dashboard/summary", handleGetDashboardSummary(transactions))
+
+	apiMux.HandleFunc("GET /api/budgets", HandleListBudgets(budgets))
+	apiMux.HandleFunc("PUT /api/budgets", HandleUpsertBudget(budgets))
+	apiMux.HandleFunc("DELETE /api/budgets/{category_id}", HandleDeleteBudget(budgets))
+
+	apiMux.HandleFunc("GET /api/recurring", HandleListRecurring(recurring))
+	apiMux.HandleFunc("POST /api/recurring", HandleCreateRecurring(recurring))
+	apiMux.HandleFunc("PATCH /api/recurring/{id}", HandleUpdateRecurring(recurring))
+	apiMux.HandleFunc("DELETE /api/recurring/{id}", HandleDeleteRecurring(recurring))
+	apiMux.HandleFunc("POST /api/recurring/{id}/run-now", HandleRunRecurringNow(recurring))
+
+	apiMux.HandleFunc("GET /api/reports/cashflow", HandleCashflowReport(reports))
+	apiMux.HandleFunc("GET /api/reports/categories", HandleCategoryReport(reports))
+	apiMux.HandleFunc("GET /api/reports/merchants", HandleMerchantReport(reports))
 
 	chatLimiter := newRateLimiter(20, time.Minute)
 	apiMux.HandleFunc("POST /api/chat", handleChat(chat, chatLimiter))

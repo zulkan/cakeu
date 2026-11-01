@@ -177,6 +177,114 @@ var chatTools = []llm.Tool{
 			Parameters:  json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
 		},
 	},
+	{
+		Type: "function",
+		Function: llm.FunctionDef{
+			Name:        "set_budget",
+			Description: "Set or replace the monthly budget for one category.",
+			Parameters: json.RawMessage(`{
+				"type":"object",
+				"properties":{
+					"category":{"type":"string","description":"Exact category name"},
+					"type":{"type":"string","enum":["income","expense"],"description":"Disambiguates categories sharing a name"},
+					"month":{"type":"string","description":"YYYY-MM, defaults to the current month"},
+					"amount":{"type":"number","exclusiveMinimum":0}
+				},
+				"required":["category","amount"],
+				"additionalProperties":false
+			}`),
+		},
+	},
+	{
+		Type: "function",
+		Function: llm.FunctionDef{
+			Name:        "list_budgets",
+			Description: "List budgets with spent, remaining and percent for one month.",
+			Parameters: json.RawMessage(`{
+				"type":"object",
+				"properties":{"month":{"type":"string","description":"YYYY-MM, defaults to the current month"}},
+				"additionalProperties":false
+			}`),
+		},
+	},
+	{
+		Type: "function",
+		Function: llm.FunctionDef{
+			Name:        "create_recurring",
+			Description: "Create a recurring transaction rule.",
+			Parameters: json.RawMessage(`{
+				"type":"object",
+				"properties":{
+					"account":{"type":"string","description":"Exact account name"},
+					"category":{"type":"string","description":"Exact category name"},
+					"type":{"type":"string","enum":["income","expense"]},
+					"amount":{"type":"number","exclusiveMinimum":0},
+					"description":{"type":"string"},
+					"frequency":{"type":"string","enum":["daily","weekly","monthly"]},
+					"interval":{"type":"integer","minimum":1,"maximum":12},
+					"next_run":{"type":"string","description":"YYYY-MM-DD, defaults to today"}
+				},
+				"required":["account","category","type","amount","frequency"],
+				"additionalProperties":false
+			}`),
+		},
+	},
+	{
+		Type: "function",
+		Function: llm.FunctionDef{
+			Name:        "list_recurring",
+			Description: "List the user's recurring transaction rules.",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`),
+		},
+	},
+	{
+		Type: "function",
+		Function: llm.FunctionDef{
+			Name:        "pause_recurring",
+			Description: "Pause or resume a recurring rule. Pass active=true to resume.",
+			Parameters: json.RawMessage(`{
+				"type":"object",
+				"properties":{
+					"id":{"type":"string","description":"Rule id from list_recurring"},
+					"active":{"type":"boolean","description":"true resumes, false or omitted pauses"}
+				},
+				"required":["id"],
+				"additionalProperties":false
+			}`),
+		},
+	},
+	{
+		Type: "function",
+		Function: llm.FunctionDef{
+			Name:        "get_cashflow_report",
+			Description: "Income, expense and net per month for a date range.",
+			Parameters: json.RawMessage(`{
+				"type":"object",
+				"properties":{
+					"from":{"type":"string","description":"YYYY-MM-DD"},
+					"to":{"type":"string","description":"YYYY-MM-DD"}
+				},
+				"required":["from","to"],
+				"additionalProperties":false
+			}`),
+		},
+	},
+	{
+		Type: "function",
+		Function: llm.FunctionDef{
+			Name:        "get_category_report",
+			Description: "Totals and share per category for a date range.",
+			Parameters: json.RawMessage(`{
+				"type":"object",
+				"properties":{
+					"from":{"type":"string","description":"YYYY-MM-DD"},
+					"to":{"type":"string","description":"YYYY-MM-DD"}
+				},
+				"required":["from","to"],
+				"additionalProperties":false
+			}`),
+		},
+	},
 }
 
 func (s *ChatService) listAccounts(ctx context.Context, userID uuid.UUID) (string, string, *model.ChatPendingAction, error) {

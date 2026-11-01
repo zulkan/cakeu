@@ -1,16 +1,26 @@
 import type {
   Account,
+  Budget,
+  BudgetStatus,
+  CashflowPoint,
   Category,
+  CategoryTotal,
   CreateAccountRequest,
   CreateCategoryRequest,
+  CreateRecurringRequest,
   CreateTransactionRequest,
   DashboardSummary,
   ImportResult,
+  MerchantTotal,
   PaginatedTransactions,
+  RecurringRule,
+  RunRecurringResult,
   Transaction,
   TransactionFilters,
   UpdateAccountRequest,
-} from '../types/finance';
+  UpdateRecurringRequest,
+  UpsertBudgetRequest,
+} from '../types';
 import { useAuthStore } from '../stores/authStore';
 import { apiUrl } from './apiBase';
 
@@ -93,6 +103,12 @@ async function requestMultipart<T>(path: string, body: FormData): Promise<T> {
   }
 
   return res.json() as Promise<T>;
+}
+
+function reportQuery(from: string, to: string, limit?: number): string {
+  const params = new URLSearchParams({ from, to });
+  if (limit !== undefined) params.set('limit', String(limit));
+  return `?${params.toString()}`;
 }
 
 function importForm(file: File, confirm: boolean, sheet?: string): FormData {
@@ -178,6 +194,53 @@ export const api = {
     requestMultipart<ImportResult>(
       '/transactions/import',
       importForm(file, true, sheet)
+    ),
+
+  // Budgets
+  listBudgets: (month: string) => {
+    const params = new URLSearchParams({ month });
+    return request<BudgetStatus[]>(`/budgets?${params.toString()}`);
+  },
+  upsertBudget: (data: UpsertBudgetRequest) =>
+    request<Budget>('/budgets', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  deleteBudget: (categoryId: string, month: string) => {
+    const params = new URLSearchParams({ month });
+    return request<void>(
+      `/budgets/${categoryId}?${params.toString()}`,
+      { method: 'DELETE' }
+    );
+  },
+
+  // Recurring
+  listRecurring: () => request<RecurringRule[]>('/recurring'),
+  createRecurring: (data: CreateRecurringRequest) =>
+    request<RecurringRule>('/recurring', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  updateRecurring: (id: string, data: UpdateRecurringRequest) =>
+    request<RecurringRule>(`/recurring/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  deleteRecurring: (id: string) =>
+    request<void>(`/recurring/${id}`, { method: 'DELETE' }),
+  runRecurringNow: (id: string) =>
+    request<RunRecurringResult>(`/recurring/${id}/run-now`, {
+      method: 'POST',
+    }),
+
+  // Reports
+  getCashflowReport: (from: string, to: string) =>
+    request<CashflowPoint[]>(`/reports/cashflow${reportQuery(from, to)}`),
+  getCategoryReport: (from: string, to: string) =>
+    request<CategoryTotal[]>(`/reports/categories${reportQuery(from, to)}`),
+  getMerchantReport: (from: string, to: string, limit = 10) =>
+    request<MerchantTotal[]>(
+      `/reports/merchants${reportQuery(from, to, limit)}`
     ),
 
   // Dashboard

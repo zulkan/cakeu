@@ -19,6 +19,7 @@ import { StatCard } from '../components/dashboard/StatCard';
 import { MonthlyBars } from '../components/dashboard/MonthlyBars';
 import { RecentTransactions } from '../components/dashboard/RecentTransactions';
 import { SetupChecklist } from '../components/dashboard/SetupChecklist';
+import { BudgetSection } from '../components/dashboard/BudgetSection';
 import type { DashboardSummary } from '../types';
 
 const emptySummary: DashboardSummary = {
@@ -155,6 +156,8 @@ function Dashboard() {
           hint="Recorded this month"
         />
       </section>
+
+      <BudgetSection categories={categories} currency={currency} />
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1.5fr_1fr]">
         <RecentTransactions

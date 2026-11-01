@@ -63,7 +63,7 @@ func (f *fakeChatService) AttachFile(ctx context.Context, userID uuid.UUID, file
 }
 
 func newChatTestHandler(chat httpserver.ChatService) http.Handler {
-	return httpserver.NewHandler(service.NewHealth(nil), nil, nil, nil, nil, chat, testJWTSecret, nil)
+	return httpserver.NewHandler(service.NewHealth(nil), nil, nil, nil, nil, nil, nil, nil, chat, testJWTSecret, nil)
 }
 
 func TestChatReturnsReply(t *testing.T) {

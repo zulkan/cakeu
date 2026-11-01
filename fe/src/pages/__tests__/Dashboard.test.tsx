@@ -6,6 +6,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { useAccountStore } from '../../stores/accountStore';
 import { useCategoryStore } from '../../stores/categoryStore';
 import { useDashboardStore } from '../../stores/dashboardStore';
+import { useBudgetStore } from '../../stores/budgetStore';
 import { testUser } from '../../test/helpers';
 import type {
   Account,
@@ -87,6 +88,17 @@ describe('Dashboard page', () => {
       isLoading: false,
       error: null,
       fetchCategories: vi.fn(async () => undefined),
+    });
+    useBudgetStore.setState({
+      month: '2026-11',
+      budgets: [],
+      isLoading: false,
+      error: null,
+      isSaving: false,
+      saveError: null,
+      fetchBudgets: vi.fn(async () => undefined),
+      upsertBudget: vi.fn(async () => undefined),
+      deleteBudget: vi.fn(async () => undefined),
     });
   });
 

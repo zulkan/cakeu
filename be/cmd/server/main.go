@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	stdhttp "net/http"
 	"os"
 	"os/signal"
@@ -84,6 +85,10 @@ func main() {
 	categoryService := service.NewCategoryService(categoryRepo)
 	transactionService := service.NewTransactionService(transactionRepo, accountRepo, categoryRepo)
 
+	budgetService := service.NewBudgetService(db.NewBudgetRepo(dbClient.Pool()))
+	recurringService := service.NewRecurringService(db.NewRecurringRepo(dbClient.Pool()), transactionService)
+	reportService := service.NewReportService(db.NewReportRepo(dbClient.Pool()))
+
 	llmClient := llm.NewHTTPClient(
 		cfg.LLMBaseURL,
 		cfg.LLMAPIKey,
@@ -91,7 +96,7 @@ func main() {
 		cfg.LLMMaxTokens,
 		time.Duration(cfg.LLMTimeoutSeconds)*time.Second,
 	)
-	chatService := service.NewChatService(accountService, categoryService, transactionService, llmClient, logger)
+	chatService := service.NewChatService(accountService, categoryService, transactionService, budgetService, recurringService, reportService, llmClient, logger)
 
 	handler := httpserver.NewHandler(
 		healthService,
@@ -99,6 +104,9 @@ func main() {
 		accountService,
 		categoryService,
 		transactionService,
+		budgetService,
+		recurringService,
+		reportService,
 		chatService,
 		cfg.JWTSecret,
 		buildAllowedOrigins(cfg.FrontendURL),
@@ -118,6 +126,8 @@ func main() {
 			stop()
 		}
 	}()
+
+	go runRecurringScheduler(ctx, logger, recurringService)
 
 	<-ctx.Done()
 
@@ -179,4 +189,30 @@ func buildAllowedOrigins(frontendURL string) []string {
 	add("http://127.0.0.1:5173")
 
 	return origins
+}
+
+func runRecurringScheduler(ctx context.Context, logger *slog.Logger, recurring service.RecurringService) {
+	run := func() {
+		posted, err := recurring.RunDue(ctx, time.Now().UTC())
+		if err != nil {
+			logger.Error("run recurring transactions", "error", err)
+		}
+		if posted > 0 {
+			logger.Info("posted recurring transactions", "count", posted)
+		}
+	}
+
+	run()
+
+	ticker := time.NewTicker(15 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			run()
+		}
+	}
 }
