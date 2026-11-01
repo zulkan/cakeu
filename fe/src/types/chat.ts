@@ -26,6 +26,7 @@ export interface ChatFile {
   name: string;
   sheet: string;
   sheets: string[];
+  sheet_rows: Record<string, number>;
   rows: number;
   columns: string[];
   preview: string[][];

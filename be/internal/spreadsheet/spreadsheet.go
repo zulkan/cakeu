@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -20,13 +21,16 @@ var (
 	ErrUnsupportedFormat = errors.New("unsupported file format")
 	ErrEmptyWorkbook     = errors.New("the file has no data")
 	ErrTooManyRows       = errors.New("the file has too many rows")
+	ErrTooManySheets     = errors.New("the file has too many sheets")
+	ErrTooManyColumns    = errors.New("the file has too many columns")
 	ErrSheetNotFound     = errors.New("sheet not found")
 )
 
-// MaxRows and MaxColumns bound how much of a sheet is read.
+// MaxRows, MaxColumns and MaxSheets bound how much of a workbook is read.
 const (
 	MaxRows    = 5001
 	MaxColumns = 50
+	MaxSheets  = 50
 )
 
 // maxInspectedCells caps the per-cell type lookups so a large sheet stays fast.
@@ -135,14 +139,22 @@ func parseCSV(data []byte) (*Workbook, error) {
 		if len(rows) >= MaxRows {
 			return nil, ErrTooManyRows
 		}
-		rows = append(rows, trimRow(record))
+
+		trimmed, trimErr := trimRow(record)
+		if trimErr != nil {
+			return nil, trimErr
+		}
+		rows = append(rows, trimmed)
 	}
 
 	return &Workbook{Sheets: []Table{{Name: "csv", Rows: rows}}}, nil
 }
 
 func parseXLSX(data []byte) (*Workbook, error) {
-	workbook, err := excelize.OpenReader(bytes.NewReader(data))
+	workbook, err := excelize.OpenReader(bytes.NewReader(data), excelize.Options{
+		UnzipSizeLimit:    64 << 20,
+		UnzipXMLSizeLimit: 16 << 20,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("open xlsx: %w", err)
 	}
@@ -155,8 +167,13 @@ func parseXLSX(data []byte) (*Workbook, error) {
 		use1904 = *props.Date1904
 	}
 
-	sheets := make([]Table, 0, len(workbook.GetSheetList()))
-	for _, name := range workbook.GetSheetList() {
+	sheetNames := workbook.GetSheetList()
+	if len(sheetNames) > MaxSheets {
+		return nil, ErrTooManySheets
+	}
+
+	sheets := make([]Table, 0, len(sheetNames))
+	for _, name := range sheetNames {
 		rows, rowsErr := workbook.GetRows(name, excelize.Options{RawCellValue: true})
 		if rowsErr != nil {
 			return nil, fmt.Errorf("read xlsx rows: %w", rowsErr)
@@ -170,7 +187,11 @@ func parseXLSX(data []byte) (*Workbook, error) {
 
 		normalizeXLSXDates(workbook, name, rows, use1904)
 		for i, row := range rows {
-			rows[i] = trimRow(row)
+			trimmed, trimErr := trimRow(row)
+			if trimErr != nil {
+				return nil, trimErr
+			}
+			rows[i] = trimmed
 		}
 
 		sheets = append(sheets, Table{Name: name, Rows: rows})
@@ -256,6 +277,10 @@ func parseXLS(data []byte) (*Workbook, error) {
 		return nil, fmt.Errorf("open xls: %w", err)
 	}
 
+	if workbook.GetNumberSheets() > MaxSheets {
+		return nil, ErrTooManySheets
+	}
+
 	sheets := make([]Table, 0, workbook.GetNumberSheets())
 	for index := 0; index < workbook.GetNumberSheets(); index++ {
 		sheet, sheetErr := workbook.GetSheet(index)
@@ -275,7 +300,11 @@ func parseXLS(data []byte) (*Workbook, error) {
 			for _, cell := range cells {
 				values = append(values, xlsCellValue(&workbook, cell))
 			}
-			rows = append(rows, trimRow(values))
+			trimmed, trimErr := trimRow(values)
+			if trimErr != nil {
+				return nil, trimErr
+			}
+			rows = append(rows, trimmed)
 		}
 
 		if len(rows) == 0 {
@@ -307,7 +336,9 @@ func xlsCellValue(workbook *xls.Workbook, cell structure.CellData) string {
 
 func xlsFormatString(workbook *xls.Workbook, cell structure.CellData) string {
 	defer func() {
-		_ = recover()
+		if recovered := recover(); recovered != nil {
+			slog.Warn("xls format lookup failed", "panic", recovered)
+		}
 	}()
 
 	index := cell.GetXFIndex()
@@ -364,9 +395,9 @@ func excelSerialToDate(serial float64) time.Time {
 	return date.Add(time.Duration(fraction * float64(24*time.Hour)))
 }
 
-func trimRow(row []string) []string {
+func trimRow(row []string) ([]string, error) {
 	if len(row) > MaxColumns {
-		row = row[:MaxColumns]
+		return nil, fmt.Errorf("%w: found %d columns, maximum is %d", ErrTooManyColumns, len(row), MaxColumns)
 	}
 
 	trimmed := make([]string, len(row))
@@ -378,5 +409,5 @@ func trimRow(row []string) []string {
 		trimmed = trimmed[:len(trimmed)-1]
 	}
 
-	return trimmed
+	return trimmed, nil
 }

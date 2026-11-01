@@ -384,10 +384,10 @@ func handleExportTransactions(transactions TransactionService) http.HandlerFunc 
 
 const maxImportBytes = 5 << 20
 
-func parseImportUpload(w http.ResponseWriter, r *http.Request) (multipart.File, string, bool) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxImportBytes)
+func parseUploadedFile(w http.ResponseWriter, r *http.Request, maxBytes int64) (multipart.File, string, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 
-	if err := r.ParseMultipartForm(maxImportBytes); err != nil {
+	if err := r.ParseMultipartForm(maxBytes); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid multipart form or file too large")
 		return nil, "", false
 	}
@@ -409,7 +409,7 @@ func handlePreviewImportTransactions(transactions TransactionService) http.Handl
 			return
 		}
 
-		file, filename, ok := parseImportUpload(w, r)
+		file, filename, ok := parseUploadedFile(w, r, maxImportBytes)
 		if !ok {
 			return
 		}
@@ -435,7 +435,7 @@ func handlePreviewImportTransactions(transactions TransactionService) http.Handl
 			return
 		}
 		result.Sheet = table.Name
-		result.Sheets = sheets
+		result.Sheets = workbookNames(sheets)
 
 		respondJSON(w, http.StatusOK, result)
 	}
@@ -449,7 +449,7 @@ func handleImportTransactions(transactions TransactionService) http.HandlerFunc 
 			return
 		}
 
-		file, filename, ok := parseImportUpload(w, r)
+		file, filename, ok := parseUploadedFile(w, r, maxImportBytes)
 		if !ok {
 			return
 		}
@@ -480,10 +480,18 @@ func handleImportTransactions(transactions TransactionService) http.HandlerFunc 
 			return
 		}
 		result.Sheet = table.Name
-		result.Sheets = sheets
+		result.Sheets = workbookNames(sheets)
 
 		respondJSON(w, http.StatusOK, result)
 	}
+}
+
+func workbookNames(names []string) []string {
+	if names == nil {
+		return []string{}
+	}
+
+	return names
 }
 
 func selectImportSheet(r *http.Request, file multipart.File, filename string) (*spreadsheet.Table, []string, error) {

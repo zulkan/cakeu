@@ -40,6 +40,10 @@ function Chat() {
   const confirmAction = useChatStore((state) => state.confirmAction);
   const cancelAction = useChatStore((state) => state.cancelAction);
   const [draft, setDraft] = useState('');
+  const activeRows = attachedFile
+    ? attachedFile.sheet_rows?.[selectedSheet ?? attachedFile.sheet] ??
+      attachedFile.rows
+    : 0;
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -232,8 +236,7 @@ function Chat() {
                     ))}
                   </Select>
                   <span className="text-xs text-stone-500">
-                    {attachedFile.rows}{' '}
-                    {attachedFile.rows === 1 ? 'row' : 'rows'}
+                    {activeRows} {activeRows === 1 ? 'row' : 'rows'}
                   </span>
                 </div>
               ) : (

@@ -12,13 +12,14 @@ type ChatRequest struct {
 }
 
 type ChatFile struct {
-	ID      string     `json:"id"`
-	Name    string     `json:"name"`
-	Sheet   string     `json:"sheet"`
-	Sheets  []string   `json:"sheets"`
-	Rows    int        `json:"rows"`
-	Columns []string   `json:"columns"`
-	Preview [][]string `json:"preview"`
+	ID        string         `json:"id"`
+	Name      string         `json:"name"`
+	Sheet     string         `json:"sheet"`
+	Sheets    []string       `json:"sheets"`
+	SheetRows map[string]int `json:"sheet_rows"`
+	Rows      int            `json:"rows"`
+	Columns   []string       `json:"columns"`
+	Preview   [][]string     `json:"preview"`
 }
 
 type ChatToolCall struct {

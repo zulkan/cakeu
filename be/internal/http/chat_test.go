@@ -182,4 +182,17 @@ func TestChatFileUploadRejectsUnsupportedFormat(t *testing.T) {
 	}
 }
 
+func TestChatStaleAttachmentReturnsBadRequest(t *testing.T) {
+	t.Parallel()
+
+	handler := newChatTestHandler(&fakeChatService{err: service.ErrAttachmentNotFound})
+
+	recorder := doRequest(t, handler, http.MethodPost, "/api/chat", signToken(t, testJWTSecret, uuid.New()),
+		`{"messages":[{"role":"user","content":"hi"}],"file_id":"gone"}`)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+}
+
 var _ httpserver.ChatService = (*fakeChatService)(nil)

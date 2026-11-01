@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"mime/multipart"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -37,15 +36,15 @@ func handleChatFileUpload(chat ChatService, limiter *rateLimiter) http.HandlerFu
 			return
 		}
 
-		file, ok := parseChatUpload(w, r)
+		file, filename, ok := parseUploadedFile(w, r, maxImportBytes)
 		if !ok {
 			return
 		}
 		defer func() {
-			_ = file.Content.Close()
+			_ = file.Close()
 		}()
 
-		result, err := chat.AttachFile(r.Context(), userID, file.Filename, file.Content)
+		result, err := chat.AttachFile(r.Context(), userID, filename, file)
 		if err != nil {
 			respondSpreadsheetError(w, err)
 			return
@@ -53,28 +52,6 @@ func handleChatFileUpload(chat ChatService, limiter *rateLimiter) http.HandlerFu
 
 		respondJSON(w, http.StatusOK, result)
 	}
-}
-
-type chatUpload struct {
-	Filename string
-	Content  multipart.File
-}
-
-func parseChatUpload(w http.ResponseWriter, r *http.Request) (chatUpload, bool) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxImportBytes)
-
-	if err := r.ParseMultipartForm(maxImportBytes); err != nil {
-		respondError(w, http.StatusBadRequest, "invalid multipart form or file too large")
-		return chatUpload{}, false
-	}
-
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		respondError(w, http.StatusBadRequest, "file is required")
-		return chatUpload{}, false
-	}
-
-	return chatUpload{Filename: header.Filename, Content: file}, true
 }
 
 func respondSpreadsheetError(w http.ResponseWriter, err error) {
@@ -160,6 +137,8 @@ func respondChatError(w http.ResponseWriter, err error) {
 		respondError(w, http.StatusNotFound, "pending action not found")
 	case errors.Is(err, service.ErrChatTooManySteps):
 		respondError(w, http.StatusUnprocessableEntity, "the assistant used too many steps; try a narrower request")
+	case errors.Is(err, service.ErrAttachmentNotFound), errors.Is(err, service.ErrUnknownSheet):
+		respondError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, service.ErrTransactionNotFound):
 		respondError(w, http.StatusNotFound, err.Error())
 	default:

@@ -87,7 +87,7 @@ func (s *ChatService) Handle(ctx context.Context, userID uuid.UUID, req model.Ch
 	if fileID != "" {
 		file, ok := s.lookupFile(userID, fileID)
 		if !ok {
-			return nil, errors.New("the attached file is no longer available; ask the user to upload it again")
+			return nil, fmt.Errorf("%w; ask the user to upload it again", ErrAttachmentNotFound)
 		}
 
 		context, contextErr := s.fileContext(file, sheet)

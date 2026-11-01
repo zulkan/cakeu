@@ -20,6 +20,7 @@ const uploadedFile = {
   name: 'budget.xlsx',
   sheet: 'Sheet1',
   sheets: ['Sheet1'],
+  sheet_rows: { Sheet1: 12 },
   rows: 12,
   columns: ['date', 'amount'],
   preview: [['2026-01-01', '12.50']],
@@ -28,6 +29,7 @@ const uploadedFile = {
 const multiSheetFile = {
   ...uploadedFile,
   sheets: ['Sheet1', 'February', 'March'],
+  sheet_rows: { Sheet1: 12, February: 5, March: 8 },
 };
 
 describe('Chat', () => {

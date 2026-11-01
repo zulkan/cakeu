@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -13,10 +14,16 @@ import (
 	"goskeleton/internal/spreadsheet"
 )
 
+var (
+	ErrAttachmentNotFound = errors.New("the attached file is no longer available")
+	ErrUnknownSheet       = errors.New("unknown sheet")
+)
+
 const (
 	chatFileTTL         = 30 * time.Minute
 	chatFilePreviewRows = 10
 	chatContextRows     = 200
+	maxFilesPerUser     = 3
 )
 
 type storedSheet struct {
@@ -75,7 +82,7 @@ func (s *ChatService) AttachFile(ctx context.Context, userID uuid.UUID, filename
 		sheets[strings.ToLower(table.Name)] = storedSheet{
 			name:    table.Name,
 			csv:     csvText,
-			rows:    maxInt(len(table.Rows)-1, 0),
+			rows:    max(len(table.Rows)-1, 0),
 			columns: columns,
 		}
 	}
@@ -93,19 +100,26 @@ func (s *ChatService) AttachFile(ctx context.Context, userID uuid.UUID, filename
 
 	s.mu.Lock()
 	s.pruneFilesLocked()
+	s.enforceFileQuotaLocked(userID)
 	s.files[id] = file
 	s.mu.Unlock()
 
 	selected, _ := file.pick("")
 
+	sheetRows := make(map[string]int, len(sheets))
+	for _, sheet := range sheets {
+		sheetRows[sheet.name] = sheet.rows
+	}
+
 	return &model.ChatFile{
-		ID:      id,
-		Name:    filename,
-		Sheet:   selected.name,
-		Sheets:  file.order,
-		Rows:    selected.rows,
-		Columns: selected.columns,
-		Preview: previewRows(defaultTable.Rows, chatFilePreviewRows),
+		ID:        id,
+		Name:      filename,
+		Sheet:     selected.name,
+		Sheets:    file.order,
+		SheetRows: sheetRows,
+		Rows:      selected.rows,
+		Columns:   selected.columns,
+		Preview:   previewRows(defaultTable.Rows, chatFilePreviewRows),
 	}, nil
 }
 
@@ -136,10 +150,31 @@ func (s *ChatService) pruneFilesLocked() {
 	}
 }
 
+func (s *ChatService) enforceFileQuotaLocked(userID uuid.UUID) {
+	count := 0
+	oldestID := ""
+	var oldestExpiry time.Time
+
+	for id, file := range s.files {
+		if file.userID != userID {
+			continue
+		}
+		count++
+		if oldestID == "" || file.expiresAt.Before(oldestExpiry) {
+			oldestID = id
+			oldestExpiry = file.expiresAt
+		}
+	}
+
+	if count >= maxFilesPerUser && oldestID != "" {
+		delete(s.files, oldestID)
+	}
+}
+
 func (s *ChatService) fileContext(file storedChatFile, sheet string) (string, error) {
 	selected, ok := file.pick(sheet)
 	if !ok {
-		return "", fmt.Errorf("unknown sheet %q; available sheets: %s", sheet, strings.Join(file.order, ", "))
+		return "", fmt.Errorf("%w %q; available sheets: %s", ErrUnknownSheet, sheet, strings.Join(file.order, ", "))
 	}
 
 	lines := strings.Split(strings.TrimRight(selected.csv, "\n"), "\n")
@@ -156,7 +191,7 @@ func (s *ChatService) fileContext(file storedChatFile, sheet string) (string, er
 func (s *ChatService) requestImportAttachedFile(ctx context.Context, userID uuid.UUID, rawArgs, fileID, sheet string) (string, string, *model.ChatPendingAction, error) {
 	file, ok := s.lookupFile(userID, fileID)
 	if !ok {
-		return "", "", nil, fmt.Errorf("the attached file is no longer available; ask the user to upload it again")
+		return "", "", nil, fmt.Errorf("%w; ask the user to upload it again", ErrAttachmentNotFound)
 	}
 
 	if err := decodeArgs(rawArgs, &struct{}{}); err != nil {
@@ -165,7 +200,7 @@ func (s *ChatService) requestImportAttachedFile(ctx context.Context, userID uuid
 
 	selected, ok := file.pick(sheet)
 	if !ok {
-		return "", "", nil, fmt.Errorf("unknown sheet %q; available sheets: %s", sheet, strings.Join(file.order, ", "))
+		return "", "", nil, fmt.Errorf("%w %q; available sheets: %s", ErrUnknownSheet, sheet, strings.Join(file.order, ", "))
 	}
 
 	preview, err := s.transactions.PreviewImport(ctx, userID, strings.NewReader(selected.csv))
@@ -211,11 +246,4 @@ func previewRows(rows [][]string, limit int) [][]string {
 	}
 
 	return rows[:limit]
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

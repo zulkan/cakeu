@@ -78,6 +78,8 @@ export function ImportCsvDialog({
     } catch (failure) {
       if (requestId.current === currentRequest) {
         setPreview(null);
+        setSheets([]);
+        setSelectedSheet(null);
         setError(messageFor(failure, 'Unable to preview this file'));
       }
     } finally {

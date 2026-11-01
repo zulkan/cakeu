@@ -3,6 +3,7 @@ package spreadsheet_test
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -157,6 +158,36 @@ func TestTableToCSV(t *testing.T) {
 	}
 	if encoded != "a,b\n1,2\n" {
 		t.Fatalf("unexpected csv %q", encoded)
+	}
+}
+
+func TestParseRejectsTooManyColumns(t *testing.T) {
+	t.Parallel()
+
+	header := strings.Repeat("c,", spreadsheet.MaxColumns) + "c"
+	_, err := spreadsheet.Parse("wide.csv", strings.NewReader(header+"\n"))
+	if !errors.Is(err, spreadsheet.ErrTooManyColumns) {
+		t.Fatalf("expected ErrTooManyColumns, got %v", err)
+	}
+}
+
+func TestParseRejectsTooManySheets(t *testing.T) {
+	t.Parallel()
+
+	workbook := excelize.NewFile()
+	for i := 0; i < spreadsheet.MaxSheets; i++ {
+		if _, err := workbook.NewSheet(fmt.Sprintf("S%d", i)); err != nil {
+			t.Fatalf("new sheet: %v", err)
+		}
+	}
+
+	buffer, err := workbook.WriteToBuffer()
+	if err != nil {
+		t.Fatalf("write workbook: %v", err)
+	}
+
+	if _, err := spreadsheet.Parse("many.xlsx", bytes.NewReader(buffer.Bytes())); !errors.Is(err, spreadsheet.ErrTooManySheets) {
+		t.Fatalf("expected ErrTooManySheets, got %v", err)
 	}
 }
 
