@@ -131,6 +131,7 @@ type fakeTransactionService struct {
 	lastID       uuid.UUID
 	lastFilters  model.TransactionFilters
 	lastCreate   model.CreateTransactionRequest
+	lastUpdate   model.UpdateTransactionRequest
 	exportRows   []model.TransactionExportRow
 	importResult *model.ImportResult
 }
@@ -201,6 +202,19 @@ func (f *fakeTransactionService) ImportTransactions(ctx context.Context, userID 
 		return f.importResult, nil
 	}
 	return &model.ImportResult{Errors: []model.ImportRowError{}, Preview: []model.ImportPreviewRow{}}, nil
+}
+
+func (f *fakeTransactionService) UpdateTransaction(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.UpdateTransactionRequest) (*model.Transaction, error) {
+	f.lastUserID = userID
+	f.lastID = id
+	f.lastUpdate = req
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.transaction != nil {
+		return f.transaction, nil
+	}
+	return &model.Transaction{ID: id, UserID: userID}, nil
 }
 
 func (f *fakeTransactionService) DeleteTransaction(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
@@ -575,6 +589,40 @@ func TestCreateTransaction(t *testing.T) {
 	}
 	if transactions.lastCreate.Amount != 42.5 {
 		t.Fatalf("expected amount 42.5, got %v", transactions.lastCreate.Amount)
+	}
+}
+
+func TestUpdateTransaction(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	transactionID := uuid.New()
+	transactions := &fakeTransactionService{}
+	handler := newTestHandler(&fakeAccountService{}, &fakeCategoryService{}, transactions, nil)
+
+	body := `{"amount":42.5,"description":"Groceries","date":"2026-10-25T00:00:00Z"}`
+
+	recorder := doRequest(t, handler, http.MethodPatch, "/api/transactions/"+transactionID.String(), signToken(t, testJWTSecret, userID), body)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+	if transactions.lastID != transactionID {
+		t.Fatalf("expected transaction id %s, got %s", transactionID, transactions.lastID)
+	}
+	if transactions.lastUserID != userID {
+		t.Fatalf("expected caller %s forwarded to UpdateTransaction, got %s", userID, transactions.lastUserID)
+	}
+	if transactions.lastUpdate.Amount == nil || *transactions.lastUpdate.Amount != 42.5 {
+		t.Fatalf("expected amount 42.5, got %v", transactions.lastUpdate.Amount)
+	}
+	if transactions.lastUpdate.Description == nil || *transactions.lastUpdate.Description != "Groceries" {
+		t.Fatalf("expected description %q, got %v", "Groceries", transactions.lastUpdate.Description)
+	}
+	if transactions.lastUpdate.Date == nil {
+		t.Fatal("expected date to be decoded")
+	}
+	if transactions.lastUpdate.AccountID != nil || transactions.lastUpdate.Type != nil {
+		t.Fatal("expected omitted fields to stay nil")
 	}
 }
 

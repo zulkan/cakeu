@@ -43,6 +43,7 @@ type TransactionService interface {
 	ExportTransactions(ctx context.Context, userID uuid.UUID, filters model.TransactionFilters, emit func(model.TransactionExportRow) error) error
 	PreviewImport(ctx context.Context, userID uuid.UUID, r io.Reader) (*model.ImportResult, error)
 	ImportTransactions(ctx context.Context, userID uuid.UUID, r io.Reader) (*model.ImportResult, error)
+	UpdateTransaction(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.UpdateTransactionRequest) (*model.Transaction, error)
 	DeleteTransaction(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
 	GetDashboardSummary(ctx context.Context, userID uuid.UUID) (*model.DashboardSummary, error)
 }
@@ -529,6 +530,49 @@ func handleCreateTransaction(transactions TransactionService) http.HandlerFunc {
 		}
 
 		respondJSON(w, http.StatusCreated, transaction)
+	}
+}
+
+// UpdateTransaction godoc
+// @Summary Update a transaction
+// @Description Update any subset of a transaction's account, category, type, amount, description or date
+// @Tags transactions
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param id path string true "Transaction ID"
+// @Param request body model.UpdateTransactionRequest true "Transaction update request"
+// @Success 200 {object} model.Transaction
+// @Failure 400 {object} model.ErrorResponse
+// @Failure 401 {object} model.ErrorResponse
+// @Failure 404 {object} model.ErrorResponse
+// @Router /api/transactions/{id} [patch]
+func handleUpdateTransaction(transactions TransactionService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, err := userIDFromContext(r.Context())
+		if err != nil {
+			respondError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		id, ok := parseUUIDPath(w, r, "id")
+		if !ok {
+			return
+		}
+
+		var req model.UpdateTransactionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		transaction, err := transactions.UpdateTransaction(r.Context(), userID, id, req)
+		if err != nil {
+			respondServiceError(w, err)
+			return
+		}
+
+		respondJSON(w, http.StatusOK, transaction)
 	}
 }
 

@@ -73,6 +73,7 @@ func NewHandler(health HealthChecker, auth AuthService, accounts AccountService,
 	apiMux.HandleFunc("POST /api/transactions/import/preview", handlePreviewImportTransactions(transactions))
 	apiMux.HandleFunc("POST /api/transactions/import", handleImportTransactions(transactions))
 	apiMux.HandleFunc("POST /api/transactions", handleCreateTransaction(transactions))
+	apiMux.HandleFunc("PATCH /api/transactions/{id}", handleUpdateTransaction(transactions))
 	apiMux.HandleFunc("DELETE /api/transactions/{id}", handleDeleteTransaction(transactions))
 
 	apiMux.HandleFunc("GET /api/dashboard/summary", handleGetDashboardSummary(transactions))
