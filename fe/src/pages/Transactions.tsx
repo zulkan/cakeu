@@ -37,6 +37,9 @@ function Transactions() {
   const createTransaction = useTransactionStore(
     (state) => state.createTransaction
   );
+  const updateTransaction = useTransactionStore(
+    (state) => state.updateTransaction
+  );
   const deleteTransaction = useTransactionStore(
     (state) => state.deleteTransaction
   );
@@ -47,6 +50,7 @@ function Transactions() {
   const fetchCategories = useCategoryStore((state) => state.fetchCategories);
 
   const [modalOpen, setModalOpen] = useState(false);
+  const [editTarget, setEditTarget] = useState<Transaction | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Transaction | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -76,6 +80,12 @@ function Transactions() {
 
   const handleCreate = async (data: CreateTransactionRequest) => {
     await createTransaction(data);
+    await fetchAccounts();
+  };
+
+  const handleUpdate = async (data: CreateTransactionRequest) => {
+    if (!editTarget) return;
+    await updateTransaction(editTarget.id, data);
     await fetchAccounts();
   };
 
@@ -242,6 +252,7 @@ function Transactions() {
             transactions={transactions}
             categories={categories}
             currency={currency}
+            onEdit={setEditTarget}
             onDelete={(transaction) => {
               setDeleteError(null);
               setDeleteTarget(transaction);
@@ -282,6 +293,15 @@ function Transactions() {
         accounts={accounts}
         categories={categories}
         onSubmit={handleCreate}
+      />
+
+      <TransactionFormModal
+        open={editTarget !== null}
+        onClose={() => setEditTarget(null)}
+        accounts={accounts}
+        categories={categories}
+        transaction={editTarget}
+        onSubmit={handleUpdate}
       />
 
       <ImportCsvDialog

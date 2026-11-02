@@ -166,6 +166,7 @@ describe('Transactions page', () => {
       fetchTransactions: vi.fn(async () => undefined),
       setFilters: vi.fn(),
       createTransaction: vi.fn(async () => undefined),
+      updateTransaction: vi.fn(async () => undefined),
       deleteTransaction: vi.fn(async () => undefined),
     });
   });
@@ -256,6 +257,61 @@ describe('Transactions page', () => {
     expect(
       within(categorySelect).queryByRole('option', { name: 'Groceries' })
     ).not.toBeInTheDocument();
+  });
+
+  it('edits a transaction through the prefilled modal', async () => {
+    const user = userEvent.setup();
+    renderTransactions();
+
+    await user.click(
+      screen.getAllByRole('button', {
+        name: /edit transaction weekly groceries/i,
+      })[0]
+    );
+
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByLabelText('Amount')).toHaveValue(42.5);
+    expect(within(dialog).getByLabelText('Date')).toHaveValue('2026-10-20');
+    expect(within(dialog).getByLabelText('Category')).toHaveValue(
+      expenseCategory.id
+    );
+    expect(within(dialog).getByLabelText('Account')).toHaveValue(account.id);
+    expect(within(dialog).getByLabelText('Description')).toHaveValue(
+      'Weekly groceries'
+    );
+
+    await user.clear(within(dialog).getByLabelText('Amount'));
+    await user.type(within(dialog).getByLabelText('Amount'), '55.75');
+    await user.click(within(dialog).getByRole('button', { name: 'Income' }));
+    await user.selectOptions(
+      within(dialog).getByLabelText('Category'),
+      incomeCategory.id
+    );
+    await user.click(
+      within(dialog).getByRole('button', { name: /save changes/i })
+    );
+
+    const updateTransaction = vi.mocked(
+      useTransactionStore.getState().updateTransaction
+    );
+
+    await waitFor(() => {
+      expect(updateTransaction).toHaveBeenCalledWith(
+        transaction.id,
+        expect.objectContaining({
+          account_id: account.id,
+          category_id: incomeCategory.id,
+          type: 'income',
+          amount: 55.75,
+          description: 'Weekly groceries',
+          date: '2026-10-20T00:00:00.000Z',
+        })
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
   });
 
   it('deletes a transaction after confirmation', async () => {

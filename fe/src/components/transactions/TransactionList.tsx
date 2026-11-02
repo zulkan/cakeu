@@ -1,4 +1,4 @@
-import { Trash2 } from 'lucide-react';
+import { Pencil, Trash2 } from 'lucide-react';
 import type { Category, Transaction } from '../../types';
 import { formatCurrency, formatDate } from '../../lib/format';
 import { TypeBadge } from '../ui/TypeBadge';
@@ -7,6 +7,7 @@ interface TransactionListProps {
   transactions: Transaction[];
   categories: Category[];
   currency: string;
+  onEdit: (transaction: Transaction) => void;
   onDelete: (transaction: Transaction) => void;
 }
 
@@ -14,6 +15,7 @@ export function TransactionList({
   transactions,
   categories,
   currency,
+  onEdit,
   onDelete,
 }: TransactionListProps) {
   const colorById = new Map(
@@ -94,15 +96,25 @@ export function TransactionList({
                     {isIncome ? '+' : '−'}
                     {formatCurrency(Math.abs(transaction.amount), currency)}
                   </td>
-                  <td className="px-4 py-3 text-right">
-                    <button
-                      type="button"
-                      onClick={() => onDelete(transaction)}
-                      aria-label={`Delete transaction ${transaction.description || transaction.category_name}`}
-                      className="rounded-lg p-2 text-stone-400 transition-colors hover:bg-expense-light hover:text-expense focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
-                    >
-                      <Trash2 className="h-4 w-4" aria-hidden="true" />
-                    </button>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center justify-end gap-1">
+                      <button
+                        type="button"
+                        onClick={() => onEdit(transaction)}
+                        aria-label={`Edit transaction ${transaction.description || transaction.category_name}`}
+                        className="rounded-lg p-2 text-stone-400 transition-colors hover:bg-brand-50 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+                      >
+                        <Pencil className="h-4 w-4" aria-hidden="true" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onDelete(transaction)}
+                        aria-label={`Delete transaction ${transaction.description || transaction.category_name}`}
+                        className="rounded-lg p-2 text-stone-400 transition-colors hover:bg-expense-light hover:text-expense focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+                      >
+                        <Trash2 className="h-4 w-4" aria-hidden="true" />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               );
@@ -138,14 +150,24 @@ export function TransactionList({
                     {isIncome ? '+' : '−'}
                     {formatCurrency(Math.abs(transaction.amount), currency)}
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => onDelete(transaction)}
-                    aria-label={`Delete transaction ${transaction.description || transaction.category_name}`}
-                    className="rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-expense-light hover:text-expense focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
-                  >
-                    <Trash2 className="h-4 w-4" aria-hidden="true" />
-                  </button>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => onEdit(transaction)}
+                      aria-label={`Edit transaction ${transaction.description || transaction.category_name}`}
+                      className="rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-brand-50 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+                    >
+                      <Pencil className="h-4 w-4" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onDelete(transaction)}
+                      aria-label={`Delete transaction ${transaction.description || transaction.category_name}`}
+                      className="rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-expense-light hover:text-expense focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+                    >
+                      <Trash2 className="h-4 w-4" aria-hidden="true" />
+                    </button>
+                  </div>
                 </div>
               </div>
             </li>

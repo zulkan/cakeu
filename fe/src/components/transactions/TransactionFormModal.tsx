@@ -3,7 +3,12 @@ import { useForm, useWatch } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { ArrowDownLeft, ArrowUpRight, Loader2 } from 'lucide-react';
-import type { Account, Category, CreateTransactionRequest } from '../../types';
+import type {
+  Account,
+  Category,
+  CreateTransactionRequest,
+  Transaction,
+} from '../../types';
 import { Modal } from '../ui/Modal';
 import { Button } from '../ui/Button';
 import { Select } from '../ui/Select';
@@ -32,6 +37,7 @@ interface TransactionFormModalProps {
   onClose: () => void;
   accounts: Account[];
   categories: Category[];
+  transaction?: Transaction | null;
   onSubmit: (data: CreateTransactionRequest) => Promise<void>;
 }
 
@@ -39,11 +45,37 @@ function todayValue(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+function formValues(
+  accounts: Account[],
+  transaction?: Transaction | null
+): TransactionFormData {
+  if (transaction) {
+    return {
+      type: transaction.type,
+      account_id: transaction.account_id,
+      category_id: transaction.category_id,
+      amount: String(transaction.amount),
+      description: transaction.description,
+      date: transaction.date.slice(0, 10),
+    };
+  }
+
+  return {
+    type: 'expense',
+    account_id: accounts[0]?.id ?? '',
+    category_id: '',
+    amount: '',
+    description: '',
+    date: todayValue(),
+  };
+}
+
 export function TransactionFormModal({
   open,
   onClose,
   accounts,
   categories,
+  transaction,
   onSubmit,
 }: TransactionFormModalProps) {
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -56,16 +88,10 @@ export function TransactionFormModal({
     formState: { errors, isSubmitting },
   } = useForm<TransactionFormData>({
     resolver: zodResolver(transactionSchema),
-    defaultValues: {
-      type: 'expense',
-      account_id: '',
-      category_id: '',
-      amount: '',
-      description: '',
-      date: todayValue(),
-    },
+    defaultValues: formValues(accounts, transaction),
   });
 
+  const isEditing = Boolean(transaction);
   const type = useWatch({ control, name: 'type' });
   const filteredCategories = categories.filter(
     (category) => category.type === type
@@ -73,20 +99,8 @@ export function TransactionFormModal({
 
   useEffect(() => {
     if (!open) return;
-
-    reset({
-      type: 'expense',
-      account_id: accounts[0]?.id ?? '',
-      category_id: '',
-      amount: '',
-      description: '',
-      date: todayValue(),
-    });
-  }, [open, accounts, reset]);
-
-  useEffect(() => {
-    setValue('category_id', '');
-  }, [type, setValue]);
+    reset(formValues(accounts, transaction));
+  }, [open, accounts, transaction, reset]);
 
   const handleClose = () => {
     setSubmitError(null);
@@ -120,8 +134,12 @@ export function TransactionFormModal({
     <Modal
       open={open}
       onClose={handleClose}
-      title="Add transaction"
-      description="Record money coming in or going out."
+      title={isEditing ? 'Edit transaction' : 'Add transaction'}
+      description={
+        isEditing
+          ? 'Update the details — account balances adjust automatically.'
+          : 'Record money coming in or going out.'
+      }
       size="lg"
     >
       <form onSubmit={handleSubmit(submit)} className="space-y-5" noValidate>
@@ -144,9 +162,10 @@ export function TransactionFormModal({
             <button
               type="button"
               aria-pressed={type === 'expense'}
-              onClick={() =>
-                setValue('type', 'expense', { shouldValidate: true })
-              }
+              onClick={() => {
+                setValue('type', 'expense', { shouldValidate: true });
+                setValue('category_id', '', { shouldValidate: true });
+              }}
               className={cn(
                 'flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500',
                 type === 'expense'
@@ -160,9 +179,10 @@ export function TransactionFormModal({
             <button
               type="button"
               aria-pressed={type === 'income'}
-              onClick={() =>
-                setValue('type', 'income', { shouldValidate: true })
-              }
+              onClick={() => {
+                setValue('type', 'income', { shouldValidate: true });
+                setValue('category_id', '', { shouldValidate: true });
+              }}
               className={cn(
                 'flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500',
                 type === 'income'
@@ -329,6 +349,8 @@ export function TransactionFormModal({
                 <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
                 Saving…
               </>
+            ) : isEditing ? (
+              'Save changes'
             ) : (
               'Save transaction'
             )}
