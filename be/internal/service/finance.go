@@ -63,6 +63,7 @@ type TransactionRepository interface {
 	List(ctx context.Context, filters model.TransactionFilters) ([]model.Transaction, int, error)
 	ForEachExportRow(ctx context.Context, filters model.TransactionFilters, emit func(model.TransactionExportRow) error) error
 	CreateBatch(ctx context.Context, userID uuid.UUID, transactions []model.Transaction) error
+	Update(ctx context.Context, userID uuid.UUID, transaction model.Transaction) (*model.Transaction, error)
 	Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
 	MonthlyTotals(ctx context.Context, userID uuid.UUID, month time.Time) (income float64, expense float64, err error)
 }
@@ -89,6 +90,7 @@ type TransactionService interface {
 	ExportTransactions(ctx context.Context, userID uuid.UUID, filters model.TransactionFilters, emit func(model.TransactionExportRow) error) error
 	PreviewImport(ctx context.Context, userID uuid.UUID, r io.Reader) (*model.ImportResult, error)
 	ImportTransactions(ctx context.Context, userID uuid.UUID, r io.Reader) (*model.ImportResult, error)
+	UpdateTransaction(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.UpdateTransactionRequest) (*model.Transaction, error)
 	DeleteTransaction(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
 	GetDashboardSummary(ctx context.Context, userID uuid.UUID) (*model.DashboardSummary, error)
 }
@@ -392,6 +394,87 @@ func (s *transactionService) ExportTransactions(ctx context.Context, userID uuid
 	}
 
 	return nil
+}
+
+func (s *transactionService) UpdateTransaction(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.UpdateTransactionRequest) (*model.Transaction, error) {
+	existing, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, ErrTransactionNotFound) {
+			return nil, ErrTransactionNotFound
+		}
+		return nil, fmt.Errorf("get transaction: %w", err)
+	}
+	if existing.UserID != userID {
+		return nil, ErrTransactionNotFound
+	}
+
+	updated := *existing
+
+	if req.Type != nil {
+		transactionType := strings.ToLower(strings.TrimSpace(*req.Type))
+		if !isValidType(transactionType) {
+			return nil, ErrInvalidType
+		}
+		updated.Type = transactionType
+	}
+
+	if req.AccountID != nil {
+		account, err := s.accounts.GetByID(ctx, *req.AccountID)
+		if err != nil {
+			if errors.Is(err, ErrAccountNotFound) {
+				return nil, ErrAccountNotFound
+			}
+			return nil, fmt.Errorf("get account: %w", err)
+		}
+		if account.UserID != userID {
+			return nil, ErrAccountNotFound
+		}
+		updated.AccountID = account.ID
+	}
+
+	categoryID := updated.CategoryID
+	if req.CategoryID != nil {
+		categoryID = *req.CategoryID
+	}
+	category, err := s.categories.GetByID(ctx, categoryID)
+	if err != nil {
+		if errors.Is(err, ErrCategoryNotFound) {
+			return nil, ErrCategoryNotFound
+		}
+		return nil, fmt.Errorf("get category: %w", err)
+	}
+	if category.UserID != userID {
+		return nil, ErrCategoryNotFound
+	}
+	if category.Type != updated.Type {
+		return nil, ErrInvalidType
+	}
+	updated.CategoryID = category.ID
+
+	if req.Amount != nil {
+		if *req.Amount <= 0 {
+			return nil, ErrInvalidAmount
+		}
+		updated.Amount = *req.Amount
+	}
+
+	if req.Description != nil {
+		updated.Description = strings.TrimSpace(*req.Description)
+	}
+
+	if req.Date != nil && !req.Date.IsZero() {
+		updated.Date = *req.Date
+	}
+
+	result, err := s.repo.Update(ctx, userID, updated)
+	if err != nil {
+		if errors.Is(err, ErrTransactionNotFound) {
+			return nil, ErrTransactionNotFound
+		}
+		return nil, fmt.Errorf("update transaction: %w", err)
+	}
+
+	return result, nil
 }
 
 func (s *transactionService) DeleteTransaction(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {

@@ -132,6 +132,7 @@ func (f *fakeCategoryRepo) Delete(ctx context.Context, userID uuid.UUID, id uuid
 type fakeTransactionRepo struct {
 	created     *model.Transaction
 	transaction *model.Transaction
+	updated     *model.Transaction
 	list        []model.Transaction
 	total       int
 	income      float64
@@ -139,12 +140,14 @@ type fakeTransactionRepo struct {
 	createErr   error
 	getErr      error
 	listErr     error
+	updateErr   error
 	deleteErr   error
 	monthlyErr  error
 	exportErr   error
 	batchErr    error
 	exportRows  []model.TransactionExportRow
 	lastBatch   []model.Transaction
+	lastUpdated model.Transaction
 	deleted     []uuid.UUID
 	lastFilters model.TransactionFilters
 	lastCreated model.Transaction
@@ -196,6 +199,17 @@ func (f *fakeTransactionRepo) ForEachExportRow(ctx context.Context, filters mode
 func (f *fakeTransactionRepo) CreateBatch(ctx context.Context, userID uuid.UUID, transactions []model.Transaction) error {
 	f.lastBatch = transactions
 	return f.batchErr
+}
+
+func (f *fakeTransactionRepo) Update(ctx context.Context, userID uuid.UUID, transaction model.Transaction) (*model.Transaction, error) {
+	f.lastUpdated = transaction
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
+	if f.updated != nil {
+		return f.updated, nil
+	}
+	return &transaction, nil
 }
 
 func (f *fakeTransactionRepo) Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
@@ -533,6 +547,203 @@ func TestTransactionServiceCreateTransactionRejectsCategoryTypeMismatch(t *testi
 	})
 	if !errors.Is(err, service.ErrInvalidType) {
 		t.Fatalf("expected ErrInvalidType, got %v", err)
+	}
+}
+
+func TestTransactionServiceUpdateTransactionMergesPartialFields(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	transactionID := uuid.New()
+	oldAccountID := uuid.New()
+	newAccountID := uuid.New()
+	oldCategoryID := uuid.New()
+	newCategoryID := uuid.New()
+	date := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+
+	existing := &model.Transaction{
+		ID:          transactionID,
+		UserID:      userID,
+		AccountID:   oldAccountID,
+		CategoryID:  oldCategoryID,
+		Type:        service.TypeExpense,
+		Amount:      20,
+		Description: "Old",
+		Date:        time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC),
+	}
+	accountRepo := &fakeAccountRepo{account: &model.Account{ID: newAccountID, UserID: userID}}
+	categoryRepo := &fakeCategoryRepo{category: &model.Category{ID: newCategoryID, UserID: userID, Type: service.TypeIncome}}
+	transactionRepo := &fakeTransactionRepo{transaction: existing}
+	transactions := service.NewTransactionService(transactionRepo, accountRepo, categoryRepo)
+
+	amount := 125.5
+	description := "  Salary  "
+	transactionType := service.TypeIncome
+
+	updated, err := transactions.UpdateTransaction(context.Background(), userID, transactionID, model.UpdateTransactionRequest{
+		AccountID:   &newAccountID,
+		CategoryID:  &newCategoryID,
+		Type:        &transactionType,
+		Amount:      &amount,
+		Description: &description,
+		Date:        &date,
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	got := transactionRepo.lastUpdated
+	if got.AccountID != newAccountID {
+		t.Fatalf("expected account %s, got %s", newAccountID, got.AccountID)
+	}
+	if got.CategoryID != newCategoryID {
+		t.Fatalf("expected category %s, got %s", newCategoryID, got.CategoryID)
+	}
+	if got.Type != service.TypeIncome {
+		t.Fatalf("expected type %q, got %q", service.TypeIncome, got.Type)
+	}
+	if got.Amount != amount {
+		t.Fatalf("expected amount %v, got %v", amount, got.Amount)
+	}
+	if got.Description != "Salary" {
+		t.Fatalf("expected trimmed description %q, got %q", "Salary", got.Description)
+	}
+	if !got.Date.Equal(date) {
+		t.Fatalf("expected date %v, got %v", date, got.Date)
+	}
+	if updated.ID != transactionID {
+		t.Fatalf("expected returned transaction %s, got %s", transactionID, updated.ID)
+	}
+}
+
+func TestTransactionServiceUpdateTransactionKeepsOmittedFields(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	transactionID := uuid.New()
+	accountID := uuid.New()
+	categoryID := uuid.New()
+	existing := &model.Transaction{
+		ID:          transactionID,
+		UserID:      userID,
+		AccountID:   accountID,
+		CategoryID:  categoryID,
+		Type:        service.TypeExpense,
+		Amount:      20,
+		Description: "Coffee",
+		Date:        time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC),
+	}
+	categoryRepo := &fakeCategoryRepo{category: &model.Category{ID: categoryID, UserID: userID, Type: service.TypeExpense}}
+	transactionRepo := &fakeTransactionRepo{transaction: existing}
+	transactions := service.NewTransactionService(transactionRepo, &fakeAccountRepo{}, categoryRepo)
+
+	amount := 30.0
+	_, err := transactions.UpdateTransaction(context.Background(), userID, transactionID, model.UpdateTransactionRequest{Amount: &amount})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	got := transactionRepo.lastUpdated
+	if got.AccountID != accountID || got.CategoryID != categoryID {
+		t.Fatalf("expected account and category to stay unchanged, got %s / %s", got.AccountID, got.CategoryID)
+	}
+	if got.Type != service.TypeExpense {
+		t.Fatalf("expected type %q, got %q", service.TypeExpense, got.Type)
+	}
+	if got.Description != "Coffee" {
+		t.Fatalf("expected description %q, got %q", "Coffee", got.Description)
+	}
+	if got.Amount != 30 {
+		t.Fatalf("expected amount 30, got %v", got.Amount)
+	}
+}
+
+func TestTransactionServiceUpdateTransactionRejectsForeignTransaction(t *testing.T) {
+	t.Parallel()
+
+	transactionID := uuid.New()
+	existing := &model.Transaction{ID: transactionID, UserID: uuid.New()}
+	transactionRepo := &fakeTransactionRepo{transaction: existing}
+	transactions := service.NewTransactionService(transactionRepo, &fakeAccountRepo{}, &fakeCategoryRepo{})
+
+	_, err := transactions.UpdateTransaction(context.Background(), uuid.New(), transactionID, model.UpdateTransactionRequest{})
+	if !errors.Is(err, service.ErrTransactionNotFound) {
+		t.Fatalf("expected ErrTransactionNotFound, got %v", err)
+	}
+	if transactionRepo.lastUpdated.ID != uuid.Nil {
+		t.Fatal("expected repo update not to run for a foreign transaction")
+	}
+}
+
+func TestTransactionServiceUpdateTransactionReturnsNotFound(t *testing.T) {
+	t.Parallel()
+
+	transactions := service.NewTransactionService(&fakeTransactionRepo{}, &fakeAccountRepo{}, &fakeCategoryRepo{})
+
+	_, err := transactions.UpdateTransaction(context.Background(), uuid.New(), uuid.New(), model.UpdateTransactionRequest{})
+	if !errors.Is(err, service.ErrTransactionNotFound) {
+		t.Fatalf("expected ErrTransactionNotFound, got %v", err)
+	}
+}
+
+func TestTransactionServiceUpdateTransactionRejectsInvalidAmount(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	transactionID := uuid.New()
+	categoryID := uuid.New()
+	existing := &model.Transaction{
+		ID:         transactionID,
+		UserID:     userID,
+		CategoryID: categoryID,
+		Type:       service.TypeExpense,
+		Amount:     20,
+	}
+	categoryRepo := &fakeCategoryRepo{category: &model.Category{ID: categoryID, UserID: userID, Type: service.TypeExpense}}
+	transactions := service.NewTransactionService(&fakeTransactionRepo{transaction: existing}, &fakeAccountRepo{}, categoryRepo)
+
+	amount := 0.0
+	_, err := transactions.UpdateTransaction(context.Background(), userID, transactionID, model.UpdateTransactionRequest{Amount: &amount})
+	if !errors.Is(err, service.ErrInvalidAmount) {
+		t.Fatalf("expected ErrInvalidAmount, got %v", err)
+	}
+}
+
+func TestTransactionServiceUpdateTransactionRejectsCategoryTypeMismatch(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	transactionID := uuid.New()
+	categoryID := uuid.New()
+	existing := &model.Transaction{
+		ID:         transactionID,
+		UserID:     userID,
+		CategoryID: uuid.New(),
+		Type:       service.TypeExpense,
+		Amount:     20,
+	}
+	categoryRepo := &fakeCategoryRepo{category: &model.Category{ID: categoryID, UserID: userID, Type: service.TypeIncome}}
+	transactions := service.NewTransactionService(&fakeTransactionRepo{transaction: existing}, &fakeAccountRepo{}, categoryRepo)
+
+	_, err := transactions.UpdateTransaction(context.Background(), userID, transactionID, model.UpdateTransactionRequest{CategoryID: &categoryID})
+	if !errors.Is(err, service.ErrInvalidType) {
+		t.Fatalf("expected ErrInvalidType, got %v", err)
+	}
+}
+
+func TestTransactionServiceUpdateTransactionRejectsForeignAccount(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	transactionID := uuid.New()
+	accountID := uuid.New()
+	existing := &model.Transaction{ID: transactionID, UserID: userID, Type: service.TypeExpense, Amount: 20}
+	accountRepo := &fakeAccountRepo{account: &model.Account{ID: accountID, UserID: uuid.New()}}
+	transactions := service.NewTransactionService(&fakeTransactionRepo{transaction: existing}, accountRepo, &fakeCategoryRepo{})
+
+	_, err := transactions.UpdateTransaction(context.Background(), userID, transactionID, model.UpdateTransactionRequest{AccountID: &accountID})
+	if !errors.Is(err, service.ErrAccountNotFound) {
+		t.Fatalf("expected ErrAccountNotFound, got %v", err)
 	}
 }
 

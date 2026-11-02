@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -334,6 +335,127 @@ func (r *TransactionRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.Tra
 	}
 
 	return &transaction, nil
+}
+
+func balanceDeltas(oldAccountID uuid.UUID, oldType string, oldAmount float64, newAccountID uuid.UUID, newType string, newAmount float64) map[uuid.UUID]float64 {
+	signedAmount := func(transactionType string, amount float64) float64 {
+		if transactionType == service.TypeExpense {
+			return -amount
+		}
+		return amount
+	}
+
+	oldDelta := signedAmount(oldType, oldAmount)
+	newDelta := signedAmount(newType, newAmount)
+
+	if oldAccountID == newAccountID {
+		return map[uuid.UUID]float64{oldAccountID: newDelta - oldDelta}
+	}
+
+	return map[uuid.UUID]float64{
+		oldAccountID: -oldDelta,
+		newAccountID: newDelta,
+	}
+}
+
+func (r *TransactionRepo) Update(ctx context.Context, userID uuid.UUID, transaction model.Transaction) (*model.Transaction, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	var (
+		oldAccountID uuid.UUID
+		oldType      string
+		oldAmount    float64
+	)
+	err = tx.QueryRow(ctx,
+		`SELECT account_id, type, amount FROM transactions WHERE id = $1 AND user_id = $2 FOR UPDATE`,
+		transaction.ID, userID,
+	).Scan(&oldAccountID, &oldType, &oldAmount)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, service.ErrTransactionNotFound
+		}
+		return nil, fmt.Errorf("select transaction: %w", err)
+	}
+
+	query := `
+		UPDATE transactions
+		SET account_id = $3,
+		    category_id = $4,
+		    type = $5,
+		    amount = $6,
+		    description = $7,
+		    date = $8
+		WHERE id = $1 AND user_id = $2
+		RETURNING id, user_id, account_id, category_id, type, amount, description, date, created_at
+	`
+
+	var updated model.Transaction
+	err = tx.QueryRow(ctx, query,
+		transaction.ID,
+		userID,
+		transaction.AccountID,
+		transaction.CategoryID,
+		transaction.Type,
+		transaction.Amount,
+		transaction.Description,
+		transaction.Date,
+	).Scan(
+		&updated.ID,
+		&updated.UserID,
+		&updated.AccountID,
+		&updated.CategoryID,
+		&updated.Type,
+		&updated.Amount,
+		&updated.Description,
+		&updated.Date,
+		&updated.CreatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("update transaction: %w", err)
+	}
+
+	if err := tx.QueryRow(ctx, `SELECT name FROM accounts WHERE id = $1`, updated.AccountID).Scan(&updated.AccountName); err != nil {
+		return nil, fmt.Errorf("select account name: %w", err)
+	}
+
+	if err := tx.QueryRow(ctx, `SELECT name FROM categories WHERE id = $1`, updated.CategoryID).Scan(&updated.CategoryName); err != nil {
+		return nil, fmt.Errorf("select category name: %w", err)
+	}
+
+	deltas := balanceDeltas(oldAccountID, oldType, oldAmount, updated.AccountID, updated.Type, updated.Amount)
+
+	accountIDs := make([]uuid.UUID, 0, len(deltas))
+	for accountID := range deltas {
+		accountIDs = append(accountIDs, accountID)
+	}
+	sort.Slice(accountIDs, func(i int, j int) bool {
+		return accountIDs[i].String() < accountIDs[j].String()
+	})
+
+	for _, accountID := range accountIDs {
+		delta := deltas[accountID]
+		if delta == 0 {
+			continue
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE accounts SET balance = balance + $2, updated_at = NOW() WHERE id = $1`,
+			accountID, delta,
+		); err != nil {
+			return nil, fmt.Errorf("update account balance: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return &updated, nil
 }
 
 func (r *TransactionRepo) List(ctx context.Context, filters model.TransactionFilters) ([]model.Transaction, int, error) {

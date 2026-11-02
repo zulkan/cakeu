@@ -100,6 +100,18 @@ type CreateTransactionRequest struct {
 	Date        time.Time `json:"date" example:"2026-10-25T00:00:00Z"`
 }
 
+// UpdateTransactionRequest carries a partial transaction update. Omitted
+// fields keep their current value; supplied fields are validated against the
+// transaction's user, account and category before anything is written.
+type UpdateTransactionRequest struct {
+	AccountID   *uuid.UUID `json:"account_id,omitempty" example:"00000000-0000-0000-0000-000000000000"`
+	CategoryID  *uuid.UUID `json:"category_id,omitempty" example:"00000000-0000-0000-0000-000000000000"`
+	Type        *string    `json:"type,omitempty" example:"expense"`
+	Amount      *float64   `json:"amount,omitempty" example:"42.50"`
+	Description *string    `json:"description,omitempty" example:"Weekly groceries"`
+	Date        *time.Time `json:"date,omitempty" example:"2026-10-25T00:00:00Z"`
+}
+
 // TransactionFilters narrows a transaction listing. UserID is populated by the
 // service layer from the authenticated user and is never read from the client.
 type TransactionFilters struct {
