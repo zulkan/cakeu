@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { useChatStore } from '../stores/chatStore';
 import { PageHeader } from '../components/ui/PageHeader';
+import { MarkdownMessage } from '../components/chat/MarkdownMessage';
 import { Button } from '../components/ui/Button';
 import { Select } from '../components/ui/Select';
 import { inputClass } from '../components/ui/formStyles';
@@ -135,18 +136,16 @@ function Chat() {
                 className={
                   entry.role === 'user'
                     ? 'max-w-[80%] rounded-2xl rounded-br-sm bg-brand-600 px-4 py-2.5 text-sm text-white'
-                    : 'max-w-[80%] space-y-2'
+                    : 'min-w-0 max-w-[80%] space-y-2'
                 }
               >
-                <div
-                  className={
-                    entry.role === 'user'
-                      ? 'whitespace-pre-wrap'
-                      : 'rounded-2xl rounded-bl-sm border border-warm-200 bg-surface-card px-4 py-2.5 text-sm text-stone-700'
-                  }
-                >
-                  {entry.content}
-                </div>
+                {entry.role === 'user' ? (
+                  <div className="whitespace-pre-wrap">{entry.content}</div>
+                ) : (
+                  <div className="min-w-0 rounded-2xl rounded-bl-sm border border-warm-200 bg-surface-card px-4 py-2.5 text-sm text-stone-700">
+                    <MarkdownMessage content={entry.content} />
+                  </div>
+                )}
 
                 {entry.toolCalls.length > 0 && (
                   <div className="flex flex-wrap gap-1.5">

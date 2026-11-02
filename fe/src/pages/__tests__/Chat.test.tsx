@@ -80,6 +80,26 @@ describe('Chat', () => {
     ]);
   });
 
+  it('renders markdown formatting in assistant replies', async () => {
+    const user = userEvent.setup();
+    vi.mocked(chatApi.send).mockResolvedValue({
+      reply: '## Spending\n\n- **Food**: 120.00\n- Transport: 40.00',
+      tool_calls: [],
+    });
+
+    render(<Chat />);
+
+    await user.type(screen.getByLabelText('Message'), 'How much did I spend?');
+    await user.click(screen.getByRole('button', { name: /send/i }));
+
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'Spending' })
+    ).toBeInTheDocument();
+    expect(screen.getByText('Food').tagName).toBe('STRONG');
+    expect(screen.getAllByRole('listitem')).toHaveLength(2);
+    expect(screen.queryByText(/\*\*Food\*\*/)).not.toBeInTheDocument();
+  });
+
   it('requires confirmation before running a destructive action', async () => {
     const user = userEvent.setup();
     vi.mocked(chatApi.send).mockResolvedValue({
