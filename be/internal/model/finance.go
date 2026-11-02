@@ -63,12 +63,51 @@ type ImportPreviewRow struct {
 	Category    string  `json:"category"`
 }
 
+type ImportFieldRule struct {
+	Column       int               `json:"column,omitempty"`
+	Constant     string            `json:"constant,omitempty"`
+	CarryForward bool              `json:"carry_forward,omitempty"`
+	DateFormat   string            `json:"date_format,omitempty"`
+	AmountFormat string            `json:"amount_format,omitempty"`
+	AmountMode   string            `json:"amount_mode,omitempty"`
+	ValueMap     map[string]string `json:"value_map,omitempty"`
+}
+
+type ImportTypeRule struct {
+	Column   int               `json:"column,omitempty"`
+	Constant string            `json:"constant,omitempty"`
+	ValueMap map[string]string `json:"value_map,omitempty"`
+}
+
+type ImportFields struct {
+	Date        ImportFieldRule `json:"date"`
+	Amount      ImportFieldRule `json:"amount"`
+	Description ImportFieldRule `json:"description"`
+	Account     ImportFieldRule `json:"account"`
+	Category    ImportFieldRule `json:"category"`
+}
+
+type ImportMapping struct {
+	Sheet      string         `json:"sheet"`
+	HeaderRow  int            `json:"header_row"`
+	DataStart  int            `json:"data_start"`
+	DataEnd    int            `json:"data_end"`
+	SkipRows   []int          `json:"skip_rows,omitempty"`
+	Fields     ImportFields   `json:"fields"`
+	Type       ImportTypeRule `json:"type"`
+	Confidence float64        `json:"confidence,omitempty"`
+	Notes      string         `json:"notes,omitempty"`
+}
+
 type ImportResult struct {
 	Total   int                `json:"total"`
 	Valid   int                `json:"valid"`
 	Invalid int                `json:"invalid"`
+	Skipped int                `json:"skipped"`
 	Sheet   string             `json:"sheet"`
 	Sheets  []string           `json:"sheets"`
+	Mode    string             `json:"mode,omitempty"`
+	Mapping *ImportMapping     `json:"mapping,omitempty"`
 	Errors  []ImportRowError   `json:"errors"`
 	Preview []ImportPreviewRow `json:"preview"`
 }

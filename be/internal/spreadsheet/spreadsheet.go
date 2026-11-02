@@ -395,6 +395,11 @@ func excelSerialToDate(serial float64) time.Time {
 	return date.Add(time.Duration(fraction * float64(24*time.Hour)))
 }
 
+// SerialToDate converts an Excel date serial to a UTC date.
+func SerialToDate(serial float64) time.Time {
+	return excelSerialToDate(serial)
+}
+
 func trimRow(row []string) ([]string, error) {
 	if len(row) > MaxColumns {
 		return nil, fmt.Errorf("%w: found %d columns, maximum is %d", ErrTooManyColumns, len(row), MaxColumns)

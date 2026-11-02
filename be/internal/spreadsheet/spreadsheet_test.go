@@ -224,3 +224,9 @@ func TestParseTrimsTrailingEmptyColumns(t *testing.T) {
 		t.Fatalf("expected trailing empties trimmed, got %+v", table.Rows[1])
 	}
 }
+
+func TestSerialToDate(t *testing.T) {
+	if got := spreadsheet.SerialToDate(45292).Format("2006-01-02"); got != "2024-01-01" {
+		t.Fatalf("expected 2024-01-01, got %s", got)
+	}
+}

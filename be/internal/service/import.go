@@ -22,8 +22,9 @@ const MaxImportRows = 5000
 const MaxImportPreviewRows = 100
 
 var (
-	ErrImportTooManyRows = errors.New("import has too many rows")
-	ErrImportMissingFile = errors.New("import file is required")
+	ErrImportTooManyRows    = errors.New("import has too many rows")
+	ErrImportMissingFile    = errors.New("import file is required")
+	ErrImportMissingColumns = errors.New("missing required columns")
 )
 
 type importCandidate struct {
@@ -108,7 +109,7 @@ func (s *transactionService) parseImport(ctx context.Context, userID uuid.UUID, 
 
 	for _, required := range []string{"date", "type", "amount", "description", "account", "category"} {
 		if _, ok := columns[required]; !ok {
-			return nil, nil, fmt.Errorf("missing column %q", required)
+			return nil, nil, fmt.Errorf("%w: missing column %q", ErrImportMissingColumns, required)
 		}
 	}
 
