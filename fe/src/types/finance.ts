@@ -105,3 +105,5 @@ export interface CreateTransactionRequest {
   description: string;
   date: string;
 }
+
+export type UpdateTransactionRequest = Partial<CreateTransactionRequest>;
