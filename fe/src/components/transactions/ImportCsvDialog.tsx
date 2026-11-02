@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
 import { AlertCircle, CheckCircle2, FileUp, Loader2 } from 'lucide-react';
-import type { ImportResult } from '../../types';
+import type { ImportMapping, ImportMode, ImportResult } from '../../types';
 import { api } from '../../lib/api';
 import { cn } from '../../lib/cn';
 import { formatCurrency, formatDate } from '../../lib/format';
@@ -36,6 +36,8 @@ export function ImportCsvDialog({
   const [error, setError] = useState<string | null>(null);
   const [selectedSheet, setSelectedSheet] = useState<string | null>(null);
   const [sheets, setSheets] = useState<string[]>([]);
+  const [mapping, setMapping] = useState<ImportMapping | null>(null);
+  const [mode, setMode] = useState<ImportMode>('ai');
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [isCommitting, setIsCommitting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -49,6 +51,8 @@ export function ImportCsvDialog({
     setError(null);
     setSelectedSheet(null);
     setSheets([]);
+    setMapping(null);
+    setMode('ai');
     setIsPreviewing(false);
     setIsCommitting(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -60,7 +64,11 @@ export function ImportCsvDialog({
     onClose();
   };
 
-  const runPreview = async (target: File, sheet?: string) => {
+  const runPreview = async (
+    target: File,
+    sheet?: string,
+    nextMode: ImportMode = mode
+  ) => {
     const currentRequest = requestId.current + 1;
     requestId.current = currentRequest;
 
@@ -68,18 +76,19 @@ export function ImportCsvDialog({
     setError(null);
 
     try {
-      const result = sheet
-        ? await api.previewImport(target, sheet)
-        : await api.previewImport(target);
+      const result = await api.previewImport(target, { sheet, mode: nextMode });
       if (requestId.current !== currentRequest) return;
       setPreview(result);
       setSheets(result.sheets);
       setSelectedSheet(result.sheet);
+      setMapping(result.mapping ?? null);
+      setMode(result.mode ?? nextMode);
     } catch (failure) {
       if (requestId.current === currentRequest) {
         setPreview(null);
         setSheets([]);
         setSelectedSheet(null);
+        setMapping(null);
         setError(messageFor(failure, 'Unable to preview this file'));
       }
     } finally {
@@ -96,6 +105,8 @@ export function ImportCsvDialog({
     setError(null);
     setSelectedSheet(null);
     setSheets([]);
+    setMapping(null);
+    setMode('ai');
 
     if (!selected) {
       requestId.current += 1;
@@ -103,14 +114,14 @@ export function ImportCsvDialog({
       return;
     }
 
-    await runPreview(selected);
+    await runPreview(selected, undefined, 'ai');
   };
 
   const handleSheetChange = async (event: ChangeEvent<HTMLSelectElement>) => {
     const name = event.target.value;
     setSelectedSheet(name);
     if (!file) return;
-    await runPreview(file, name);
+    await runPreview(file, name, mode);
   };
 
   const handleCommit = async () => {
@@ -120,10 +131,11 @@ export function ImportCsvDialog({
     setError(null);
 
     try {
-      const result =
-        selectedSheet && sheets.length > 1
-          ? await api.importTransactions(file, selectedSheet)
-          : await api.importTransactions(file);
+      const result = await api.importTransactions(file, {
+        sheet: selectedSheet ?? undefined,
+        mode,
+        mapping: mapping ?? undefined,
+      });
       setSuccess(result);
       await onImported();
     } catch (failure) {
@@ -133,12 +145,29 @@ export function ImportCsvDialog({
     }
   };
 
+  const handleStandardImport = async () => {
+    if (!file) return;
+    setMode('strict');
+    await runPreview(file, selectedSheet ?? undefined, 'strict');
+  };
+
   const canCommit =
     Boolean(file) &&
     Boolean(preview) &&
     (preview?.valid ?? 0) > 0 &&
     !isPreviewing &&
     !isCommitting;
+
+  const previewMapping = preview?.mapping ?? null;
+  const mappingRows = previewMapping
+    ? ([
+        ['date', previewMapping.fields.date],
+        ['amount', previewMapping.fields.amount],
+        ['description', previewMapping.fields.description],
+        ['account', previewMapping.fields.account],
+        ['category', previewMapping.fields.category],
+      ] as const)
+    : [];
 
   const footer = success ? (
     <div className="flex justify-end">
@@ -218,8 +247,8 @@ export function ImportCsvDialog({
             />
             <p id="import-csv-hint" className={hintClass}>
               One .csv, .xlsx, or .xls file up to 5 MB and 5,000 rows per sheet.
-              Required columns: date, type, amount, description, account,
-              category.
+              AI maps the columns; you can confirm the mapping before anything
+              is imported.
             </p>
           </div>
 
@@ -255,7 +284,7 @@ export function ImportCsvDialog({
                 className="h-4 w-4 animate-spin text-brand-500"
                 aria-hidden="true"
               />
-              Checking rows…
+              {mode === 'ai' ? 'Analyzing with AI…' : 'Checking rows…'}
             </div>
           )}
 
@@ -268,11 +297,51 @@ export function ImportCsvDialog({
             </p>
           )}
 
+          {error && file && mode === 'ai' && (
+            <Button
+              variant="secondary"
+              onClick={() => void handleStandardImport()}
+            >
+              Standard import
+            </Button>
+          )}
+
+          {mode === 'ai' && previewMapping && (
+            <section className="space-y-2 rounded-xl border border-brand-200 bg-brand-50/40 p-3">
+              <h3 className="text-sm font-semibold text-stone-800">AI mapping</h3>
+              <p className={hintClass}>
+                Header row {previewMapping.header_row || '—'}; data rows{' '}
+                {previewMapping.data_start}–{previewMapping.data_end}. AI read a
+                sample of this sheet to map the columns. Nothing is imported
+                until you confirm.
+              </p>
+              <ul className="space-y-1 text-sm text-stone-700">
+                {mappingRows.map(([field, rule]) => (
+                  <li key={field}>
+                    <span className="font-semibold">{field}</span>
+                    {' → '}
+                    {rule.column ? `column ${rule.column}` : rule.constant}
+                  </li>
+                ))}
+                <li>
+                  <span className="font-semibold">type</span>
+                  {' → '}
+                  {previewMapping.type.column
+                    ? `column ${previewMapping.type.column}`
+                    : previewMapping.type.constant}
+                </li>
+              </ul>
+              {previewMapping.notes && (
+                <p className={hintClass}>{previewMapping.notes}</p>
+              )}
+            </section>
+          )}
+
           {preview && (
             <>
               <dl
                 aria-label="Import summary"
-                className="grid grid-cols-3 gap-2"
+                className="grid grid-cols-2 gap-2 sm:grid-cols-4"
               >
                 {[
                   { label: 'Total', value: preview.total, tone: 'text-stone-900' },
@@ -281,6 +350,11 @@ export function ImportCsvDialog({
                     label: 'Invalid',
                     value: preview.invalid,
                     tone: preview.invalid > 0 ? 'text-expense' : 'text-stone-900',
+                  },
+                  {
+                    label: 'Skipped',
+                    value: preview.skipped,
+                    tone: 'text-stone-600',
                   },
                 ].map((stat) => (
                   <div

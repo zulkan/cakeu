@@ -10,6 +10,7 @@ import { api } from '../../lib/api';
 import type {
   Account,
   Category,
+  ImportMapping,
   ImportResult,
   Transaction,
 } from '../../types';
@@ -69,12 +70,30 @@ function stubObjectUrls() {
   return { createObjectURL, revokeObjectURL };
 }
 
+const importMapping: ImportMapping = {
+  sheet: 'csv',
+  header_row: 1,
+  data_start: 2,
+  data_end: 3,
+  fields: {
+    date: { column: 1 },
+    amount: { column: 3 },
+    description: { column: 4 },
+    account: { column: 5 },
+    category: { column: 6 },
+  },
+  type: { column: 2 },
+};
+
 const importPreview: ImportResult = {
   total: 3,
   valid: 2,
   invalid: 1,
-  sheet: 'Sheet1',
-  sheets: ['Sheet1'],
+  skipped: 0,
+  sheet: 'csv',
+  sheets: ['csv'],
+  mode: 'ai',
+  mapping: importMapping,
   errors: [{ row: 4, message: 'unknown account "Cash"' }],
   preview: [
     {
@@ -90,7 +109,7 @@ const importPreview: ImportResult = {
       row: 3,
       date: '2026-10-02',
       type: 'income',
-      amount: 500,
+      amount: 100,
       description: 'Salary',
       account: account.name,
       category: incomeCategory.name,
@@ -114,14 +133,18 @@ const workbookPreview: ImportResult = {
   ...importPreview,
   sheet: 'January',
   sheets: ['January', 'February', 'March'],
+  mapping: { ...importMapping, sheet: 'January' },
 };
 
 const februaryPreview: ImportResult = {
   total: 5,
   valid: 4,
   invalid: 1,
+  skipped: 0,
   sheet: 'February',
   sheets: ['January', 'February', 'March'],
+  mode: 'ai',
+  mapping: { ...importMapping, sheet: 'February', data_end: 5 },
   errors: [{ row: 6, message: 'invalid amount "x"' }],
   preview: [
     {
@@ -427,7 +450,12 @@ describe('Transactions page', () => {
 
     await user.upload(within(dialog).getByLabelText(/csv file/i), file);
 
-    await waitFor(() => expect(api.previewImport).toHaveBeenCalledWith(file));
+    await waitFor(() =>
+      expect(api.previewImport).toHaveBeenCalledWith(file, {
+        sheet: undefined,
+        mode: 'ai',
+      })
+    );
 
     const summary = await within(dialog).findByLabelText('Import summary');
     expect(within(summary).getByText('3')).toBeInTheDocument();
@@ -440,11 +468,64 @@ describe('Transactions page', () => {
     expect(within(dialog).getByText('Coffee')).toBeInTheDocument();
   });
 
+  it('shows the AI mapping and sends it on commit', async () => {
+    vi.spyOn(api, 'previewImport').mockResolvedValue(importPreview);
+    const importTransactions = vi
+      .spyOn(api, 'importTransactions')
+      .mockResolvedValue(importPreview);
+    const user = userEvent.setup();
+    renderTransactions();
+
+    await user.click(screen.getByRole('button', { name: /import csv/i }));
+    const dialog = await screen.findByRole('dialog');
+    await user.upload(within(dialog).getByLabelText(/csv file/i), csvFile());
+
+    await within(dialog).findByText(/AI mapping/i);
+    expect(within(dialog).getByText(/header row 1/i)).toBeInTheDocument();
+
+    await user.click(
+      within(dialog).getByRole('button', { name: /import transactions/i })
+    );
+
+    await waitFor(() =>
+      expect(importTransactions).toHaveBeenCalledWith(
+        expect.any(File),
+        expect.objectContaining({ mode: 'ai', mapping: importPreview.mapping })
+      )
+    );
+  });
+
+  it('falls back to a standard import when AI previewing fails', async () => {
+    vi.spyOn(api, 'previewImport')
+      .mockRejectedValueOnce(new Error('AI mapping failed'))
+      .mockResolvedValueOnce(importPreview);
+    const { user, dialog } = await openImportDialog();
+    const file = csvFile();
+
+    await user.upload(within(dialog).getByLabelText(/csv file/i), file);
+
+    expect(
+      await within(dialog).findByText('AI mapping failed')
+    ).toBeInTheDocument();
+    await user.click(
+      within(dialog).getByRole('button', { name: /standard import/i })
+    );
+
+    await waitFor(() =>
+      expect(api.previewImport).toHaveBeenLastCalledWith(file, {
+        sheet: undefined,
+        mode: 'strict',
+      })
+    );
+    expect(await within(dialog).findByLabelText('Import summary')).toBeInTheDocument();
+  });
+
   it('keeps the commit button disabled when no rows are valid', async () => {
     vi.spyOn(api, 'previewImport').mockResolvedValue({
       total: 1,
       valid: 0,
       invalid: 1,
+      skipped: 0,
       sheet: 'Sheet1',
       sheets: ['Sheet1'],
       errors: [{ row: 2, message: 'invalid amount "x"' }],
@@ -466,6 +547,7 @@ describe('Transactions page', () => {
       total: 2,
       valid: 2,
       invalid: 0,
+      skipped: 0,
       sheet: 'Sheet1',
       sheets: ['Sheet1'],
       errors: [],
@@ -488,7 +570,13 @@ describe('Transactions page', () => {
     await waitFor(() => expect(commit).toBeEnabled());
     await user.click(commit);
 
-    await waitFor(() => expect(importCsv).toHaveBeenCalledWith(file));
+    await waitFor(() =>
+      expect(importCsv).toHaveBeenCalledWith(file, {
+        sheet: 'csv',
+        mode: 'ai',
+        mapping: importPreview.mapping,
+      })
+    );
     expect(
       await within(dialog).findByText(/imported 2 of 2 transactions/i)
     ).toBeInTheDocument();
@@ -534,7 +622,10 @@ describe('Transactions page', () => {
     await user.selectOptions(sheetSelect, 'February');
 
     await waitFor(() =>
-      expect(api.previewImport).toHaveBeenLastCalledWith(file, 'February')
+      expect(api.previewImport).toHaveBeenLastCalledWith(file, {
+        sheet: 'February',
+        mode: 'ai',
+      })
     );
 
     const summary = await within(dialog).findByLabelText('Import summary');
@@ -554,6 +645,7 @@ describe('Transactions page', () => {
       total: 4,
       valid: 4,
       invalid: 0,
+      skipped: 0,
       sheet: 'February',
       sheets: ['January', 'February', 'March'],
       errors: [],
@@ -566,7 +658,10 @@ describe('Transactions page', () => {
     await within(dialog).findByLabelText('Import summary');
     await user.selectOptions(within(dialog).getByLabelText('Sheet'), 'February');
     await waitFor(() =>
-      expect(api.previewImport).toHaveBeenLastCalledWith(file, 'February')
+      expect(api.previewImport).toHaveBeenLastCalledWith(file, {
+        sheet: 'February',
+        mode: 'ai',
+      })
     );
 
     const commit = within(dialog).getByRole('button', {
@@ -576,7 +671,11 @@ describe('Transactions page', () => {
     await user.click(commit);
 
     await waitFor(() =>
-      expect(importCsv).toHaveBeenCalledWith(file, 'February')
+      expect(importCsv).toHaveBeenCalledWith(file, {
+        sheet: 'February',
+        mode: 'ai',
+        mapping: februaryPreview.mapping,
+      })
     );
     expect(
       await within(dialog).findByText(/imported 4 of 4 transactions/i)
