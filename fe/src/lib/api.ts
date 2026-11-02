@@ -10,6 +10,8 @@ import type {
   CreateRecurringRequest,
   CreateTransactionRequest,
   DashboardSummary,
+  ImportMapping,
+  ImportMode,
   ImportResult,
   MerchantTotal,
   PaginatedTransactions,
@@ -112,11 +114,19 @@ function reportQuery(from: string, to: string, limit?: number): string {
   return `?${params.toString()}`;
 }
 
-function importForm(file: File, confirm: boolean, sheet?: string): FormData {
+interface ImportOptions {
+  sheet?: string;
+  mode?: ImportMode;
+  mapping?: ImportMapping;
+}
+
+function importForm(file: File, confirm: boolean, opts: ImportOptions = {}): FormData {
   const form = new FormData();
   form.append('file', file);
   if (confirm) form.append('confirm', 'true');
-  if (sheet) form.append('sheet', sheet);
+  if (opts.sheet) form.append('sheet', opts.sheet);
+  if (opts.mode) form.append('mode', opts.mode);
+  if (opts.mapping) form.append('mapping', JSON.stringify(opts.mapping));
   return form;
 }
 
@@ -191,15 +201,15 @@ export const api = {
 
     return res.blob();
   },
-  previewImport: (file: File, sheet?: string) =>
+  previewImport: (file: File, opts: ImportOptions = {}) =>
     requestMultipart<ImportResult>(
       '/transactions/import/preview',
-      importForm(file, false, sheet)
+      importForm(file, false, opts)
     ),
-  importTransactions: (file: File, sheet?: string) =>
+  importTransactions: (file: File, opts: ImportOptions = {}) =>
     requestMultipart<ImportResult>(
       '/transactions/import',
-      importForm(file, true, sheet)
+      importForm(file, true, opts)
     ),
 
   // Budgets
