@@ -83,3 +83,40 @@ func TestParseImportMappingResponseRejectsNoise(t *testing.T) {
 		t.Fatal("expected an error")
 	}
 }
+
+func TestSampleRowNumbersDistributesAcrossSheet(t *testing.T) {
+	got := sampleRowNumbers(100, 30)
+	if len(got) != 30 {
+		t.Fatalf("expected 30 rows, got %d", len(got))
+	}
+	for _, row := range got {
+		if row < 1 || row > 100 {
+			t.Fatalf("row %d out of bounds", row)
+		}
+	}
+
+	// Middle row must be present so the model sees representative content
+	found50 := false
+	for _, row := range got {
+		if row == 50 {
+			found50 = true
+			break
+		}
+	}
+	if !found50 {
+		t.Fatalf("expected row 50 to be sampled, got %v", got)
+	}
+
+	// Largest gap between consecutive rows after first block should be ≤ 8
+	// First block is rows 1..12, remainder starts after that
+	var maxGap int
+	for i := 1; i < len(got); i++ {
+		gap := got[i] - got[i-1]
+		if gap > maxGap {
+			maxGap = gap
+		}
+	}
+	if maxGap > 8 {
+		t.Fatalf("largest gap between sampled rows is %d (> 8): %v", maxGap, got)
+	}
+}

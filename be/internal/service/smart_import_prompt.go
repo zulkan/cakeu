@@ -189,8 +189,10 @@ func sampleRowNumbers(total, limit int) []int {
 	for row := total - last + 1; row <= total; row++ {
 		add(row)
 	}
-	for i := 1; len(rows) < limit && i <= total; i++ {
-		add(1 + (i-1)*total/limit)
+	remaining := limit - len(rows)
+	span := total - first - last
+	for i := 1; i <= remaining && span > 0; i++ {
+		add(first + i*(span+1)/(remaining+1))
 	}
 
 	sort.Ints(rows)
