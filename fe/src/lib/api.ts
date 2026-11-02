@@ -19,6 +19,7 @@ import type {
   TransactionFilters,
   UpdateAccountRequest,
   UpdateRecurringRequest,
+  UpdateTransactionRequest,
   UpsertBudgetRequest,
 } from '../types';
 import { useAuthStore } from '../stores/authStore';
@@ -164,6 +165,11 @@ export const api = {
   createTransaction: (data: CreateTransactionRequest) =>
     request<Transaction>('/transactions', {
       method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  updateTransaction: (id: string, data: UpdateTransactionRequest) =>
+    request<Transaction>(`/transactions/${id}`, {
+      method: 'PATCH',
       body: JSON.stringify(data),
     }),
   deleteTransaction: (id: string) =>

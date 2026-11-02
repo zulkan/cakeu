@@ -3,6 +3,7 @@ import type {
   CreateTransactionRequest,
   Transaction,
   TransactionFilters,
+  UpdateTransactionRequest,
 } from '../types';
 import { api } from '../lib/api';
 
@@ -15,6 +16,10 @@ interface TransactionState {
   setFilters: (filters: TransactionFilters) => void;
   fetchTransactions: (filters?: TransactionFilters) => Promise<void>;
   createTransaction: (data: CreateTransactionRequest) => Promise<void>;
+  updateTransaction: (
+    id: string,
+    data: UpdateTransactionRequest
+  ) => Promise<void>;
   deleteTransaction: (id: string) => Promise<void>;
 }
 
@@ -44,6 +49,10 @@ export const useTransactionStore = create<TransactionState>()((set, get) => ({
   },
   createTransaction: async (data) => {
     await api.createTransaction(data);
+    await get().fetchTransactions();
+  },
+  updateTransaction: async (id, data) => {
+    await api.updateTransaction(id, data);
     await get().fetchTransactions();
   },
   deleteTransaction: async (id) => {
