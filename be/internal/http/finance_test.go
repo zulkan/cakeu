@@ -267,7 +267,11 @@ func newTestHandler(accounts *fakeAccountService, categories *fakeCategoryServic
 }
 
 func newTestHandlerWithImports(accounts *fakeAccountService, categories *fakeCategoryService, transactions *fakeTransactionService, imports httpserver.ImportService, origins []string) http.Handler {
-	return httpserver.NewHandler(service.NewHealth(nil), nil, accounts, categories, transactions, imports, nil, nil, nil, nil, testJWTSecret, origins)
+	return httpserver.NewHandler(service.NewHealth(nil), nil, accounts, categories, transactions, imports, service.ImportModeAI, nil, nil, nil, nil, testJWTSecret, origins)
+}
+
+func newTestHandlerWithImportMode(imports httpserver.ImportService, importMode service.ImportMode, origins []string) http.Handler {
+	return httpserver.NewHandler(service.NewHealth(nil), nil, &fakeAccountService{}, &fakeCategoryService{}, &fakeTransactionService{}, imports, importMode, nil, nil, nil, nil, testJWTSecret, origins)
 }
 
 func signToken(t *testing.T, secret string, userID uuid.UUID) string {
@@ -769,6 +773,23 @@ func TestPreviewImportMapsAIUnavailableTo502(t *testing.T) {
 
 	if recorder.Code != http.StatusBadGateway {
 		t.Fatalf("expected 502, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestPreviewImportStrictConfigIsNotRateLimited(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	imports := &fakeImportService{result: &model.ImportResult{Total: 1, Valid: 1, Mode: "strict"}}
+	handler := newTestHandlerWithImportMode(imports, service.ImportModeStrict, nil)
+
+	token := signToken(t, testJWTSecret, userID)
+	for i := 0; i < 21; i++ {
+		recorder := doMultipartRequest(t, handler, "/api/transactions/import/preview", token,
+			"date,type,amount,description,account,category\n2026-10-01,expense,12.50,Coffee,Cash,Food\n", false)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("request %d: expected 200, got %d with body %q", i+1, recorder.Code, recorder.Body.String())
+		}
 	}
 }
 

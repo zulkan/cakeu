@@ -13,7 +13,7 @@ import (
 func TestHealthEndpointReturnsOKStatus(t *testing.T) {
 	t.Parallel()
 
-	handler := httpserver.NewHandler(service.NewHealth(nil), nil, nil, nil, nil, nil, nil, nil, nil, nil, "test-secret", nil)
+	handler := httpserver.NewHandler(service.NewHealth(nil), nil, nil, nil, nil, nil, service.ImportModeAI, nil, nil, nil, nil, "test-secret", nil)
 	request := httptest.NewRequest(http.MethodGet, "/health", nil)
 	request.RemoteAddr = "127.0.0.1:12345"
 	recorder := httptest.NewRecorder()
@@ -37,7 +37,7 @@ func TestHealthEndpointReturnsOKStatus(t *testing.T) {
 func TestHealthEndpointRejectsNonLocalRequests(t *testing.T) {
 	t.Parallel()
 
-	handler := httpserver.NewHandler(service.NewHealth(nil), nil, nil, nil, nil, nil, nil, nil, nil, nil, "test-secret", nil)
+	handler := httpserver.NewHandler(service.NewHealth(nil), nil, nil, nil, nil, nil, service.ImportModeAI, nil, nil, nil, nil, "test-secret", nil)
 	request := httptest.NewRequest(http.MethodGet, "/health", nil)
 	request.RemoteAddr = "203.0.113.10:12345"
 	recorder := httptest.NewRecorder()

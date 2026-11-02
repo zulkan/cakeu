@@ -117,6 +117,7 @@ func main() {
 		categoryService,
 		transactionService,
 		importService,
+		service.ImportMode(cfg.SmartImportMode),
 		budgetService,
 		recurringService,
 		reportService,

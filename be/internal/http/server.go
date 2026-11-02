@@ -32,7 +32,7 @@ type AuthService interface {
 // @host localhost:8080
 // @BasePath /
 // @schemes http
-func NewHandler(health HealthChecker, auth AuthService, accounts AccountService, categories CategoryService, transactions TransactionService, imports ImportService, budgets BudgetService, recurring RecurringService, reports ReportService, chat ChatService, jwtSecret string, allowedOrigins []string) http.Handler {
+func NewHandler(health HealthChecker, auth AuthService, accounts AccountService, categories CategoryService, transactions TransactionService, imports ImportService, importMode service.ImportMode, budgets BudgetService, recurring RecurringService, reports ReportService, chat ChatService, jwtSecret string, allowedOrigins []string) http.Handler {
 	mux := http.NewServeMux()
 
 	// Health endpoint (local only)
@@ -70,7 +70,10 @@ func NewHandler(health HealthChecker, auth AuthService, accounts AccountService,
 
 	apiMux.HandleFunc("GET /api/transactions", handleListTransactions(transactions))
 	apiMux.HandleFunc("GET /api/transactions/export.csv", handleExportTransactions(transactions))
-	importLimiter := newRateLimiter(20, time.Minute)
+	var importLimiter *rateLimiter
+	if importMode != service.ImportModeStrict {
+		importLimiter = newRateLimiter(20, time.Minute)
+	}
 	apiMux.HandleFunc("POST /api/transactions/import/preview", handlePreviewImportTransactions(imports, importLimiter))
 	apiMux.HandleFunc("POST /api/transactions/import", handleImportTransactions(imports))
 	apiMux.HandleFunc("POST /api/transactions", handleCreateTransaction(transactions))
