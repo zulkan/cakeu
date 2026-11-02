@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	httpserver "goskeleton/internal/http"
 	"goskeleton/internal/model"
 	"goskeleton/internal/service"
+	"goskeleton/internal/spreadsheet"
 )
 
 const testJWTSecret = "test-secret"
@@ -234,8 +236,38 @@ func (f *fakeTransactionService) GetDashboardSummary(ctx context.Context, userID
 	return &model.DashboardSummary{RecentTransactions: []model.Transaction{}}, nil
 }
 
+type fakeImportService struct {
+	result      *model.ImportResult
+	err         error
+	lastUserID  uuid.UUID
+	lastOptions service.ImportOptions
+}
+
+func (f *fakeImportService) Preview(ctx context.Context, userID uuid.UUID, table *spreadsheet.Table, sheets []string, opts service.ImportOptions) (*model.ImportResult, error) {
+	f.lastUserID = userID
+	f.lastOptions = opts
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.result, nil
+}
+
+func (f *fakeImportService) Import(ctx context.Context, userID uuid.UUID, table *spreadsheet.Table, sheets []string, opts service.ImportOptions) (*model.ImportResult, error) {
+	f.lastUserID = userID
+	f.lastOptions = opts
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.result, nil
+}
+
 func newTestHandler(accounts *fakeAccountService, categories *fakeCategoryService, transactions *fakeTransactionService, origins []string) http.Handler {
-	return httpserver.NewHandler(service.NewHealth(nil), nil, accounts, categories, transactions, nil, nil, nil, nil, testJWTSecret, origins)
+	imports := &fakeImportService{result: transactions.importResult}
+	return newTestHandlerWithImports(accounts, categories, transactions, imports, origins)
+}
+
+func newTestHandlerWithImports(accounts *fakeAccountService, categories *fakeCategoryService, transactions *fakeTransactionService, imports httpserver.ImportService, origins []string) http.Handler {
+	return httpserver.NewHandler(service.NewHealth(nil), nil, accounts, categories, transactions, imports, nil, nil, nil, nil, testJWTSecret, origins)
 }
 
 func signToken(t *testing.T, secret string, userID uuid.UUID) string {
@@ -672,7 +704,8 @@ func TestPreviewImportTransactions(t *testing.T) {
 			Preview: []model.ImportPreviewRow{{Row: 2, Date: "2026-10-01", Type: "expense", Amount: 12.5, Account: "Cash", Category: "Food"}},
 		},
 	}
-	handler := newTestHandler(&fakeAccountService{}, &fakeCategoryService{}, transactions, nil)
+	imports := &fakeImportService{result: transactions.importResult}
+	handler := newTestHandlerWithImports(&fakeAccountService{}, &fakeCategoryService{}, transactions, imports, nil)
 
 	recorder := doMultipartRequest(t, handler, "/api/transactions/import/preview", signToken(t, testJWTSecret, userID),
 		"date,type,amount,description,account,category\n2026-10-01,expense,12.50,Coffee,Cash,Food\n", false)
@@ -688,8 +721,8 @@ func TestPreviewImportTransactions(t *testing.T) {
 	if result.Valid != 1 || len(result.Preview) != 1 {
 		t.Fatalf("unexpected import preview: %+v", result)
 	}
-	if transactions.lastUserID != userID {
-		t.Fatalf("expected caller %s forwarded, got %s", userID, transactions.lastUserID)
+	if imports.lastUserID != userID {
+		t.Fatalf("expected caller %s forwarded, got %s", userID, imports.lastUserID)
 	}
 }
 
@@ -704,6 +737,72 @@ func TestImportTransactionsRequiresConfirm(t *testing.T) {
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("expected status 400 without confirm, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestPreviewImportUsesAIImportService(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	imports := &fakeImportService{result: &model.ImportResult{Total: 1, Valid: 1, Mode: "ai", Sheet: "JANUARI", Sheets: []string{"JANUARI"}}}
+	handler := newTestHandlerWithImports(&fakeAccountService{}, &fakeCategoryService{}, &fakeTransactionService{}, imports, nil)
+
+	recorder := doMultipartRequest(t, handler, "/api/transactions/import/preview", signToken(t, testJWTSecret, userID),
+		"date,type,amount,description,account,category\n2026-10-01,expense,12.50,Coffee,Cash,Food\n", false)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+	if imports.lastOptions.Mode != service.ImportModeAI || imports.lastOptions.Filename != "transactions.csv" {
+		t.Fatalf("unexpected options: %+v", imports.lastOptions)
+	}
+}
+
+func TestPreviewImportMapsAIUnavailableTo502(t *testing.T) {
+	t.Parallel()
+
+	imports := &fakeImportService{err: fmt.Errorf("%w: timeout", service.ErrImportAIUnavailable)}
+	handler := newTestHandlerWithImports(&fakeAccountService{}, &fakeCategoryService{}, &fakeTransactionService{}, imports, nil)
+
+	recorder := doMultipartRequest(t, handler, "/api/transactions/import/preview", signToken(t, testJWTSecret, uuid.New()),
+		"date,type,amount,description,account,category\n", false)
+
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestImportRejectsOversizedMapping(t *testing.T) {
+	t.Parallel()
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	filePart, err := writer.CreateFormFile("file", "transactions.csv")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := filePart.Write([]byte("date,type,amount,description,account,category\n")); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	if err := writer.WriteField("confirm", "true"); err != nil {
+		t.Fatalf("write confirm: %v", err)
+	}
+	if err := writer.WriteField("mapping", strings.Repeat("x", service.MaxMappingBytes+1)); err != nil {
+		t.Fatalf("write mapping: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/transactions/import", body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("Authorization", "Bearer "+signToken(t, testJWTSecret, uuid.New()))
+
+	recorder := httptest.NewRecorder()
+	newTestHandler(&fakeAccountService{}, &fakeCategoryService{}, &fakeTransactionService{}, nil).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d with body %q", recorder.Code, recorder.Body.String())
 	}
 }
 

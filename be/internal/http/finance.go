@@ -48,6 +48,11 @@ type TransactionService interface {
 	GetDashboardSummary(ctx context.Context, userID uuid.UUID) (*model.DashboardSummary, error)
 }
 
+type ImportService interface {
+	Preview(ctx context.Context, userID uuid.UUID, table *spreadsheet.Table, sheets []string, opts service.ImportOptions) (*model.ImportResult, error)
+	Import(ctx context.Context, userID uuid.UUID, table *spreadsheet.Table, sheets []string, opts service.ImportOptions) (*model.ImportResult, error)
+}
+
 // ListAccounts godoc
 // @Summary List accounts
 // @Description List all accounts belonging to the authenticated user
@@ -402,7 +407,7 @@ func parseUploadedFile(w http.ResponseWriter, r *http.Request, maxBytes int64) (
 	return file, header.Filename, true
 }
 
-func handlePreviewImportTransactions(transactions TransactionService) http.HandlerFunc {
+func handlePreviewImportTransactions(imports ImportService, limiter *rateLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID, err := userIDFromContext(r.Context())
 		if err != nil {
@@ -424,25 +429,26 @@ func handlePreviewImportTransactions(transactions TransactionService) http.Handl
 			return
 		}
 
-		csvText, err := table.ToCSV()
-		if err != nil {
-			respondError(w, http.StatusBadRequest, "unable to read the uploaded file")
+		mode := importModeFromRequest(r)
+		if mode == service.ImportModeAI && limiter != nil && !limiter.allow("import-ai|"+userID.String()) {
+			respondError(w, http.StatusTooManyRequests, "too many requests")
 			return
 		}
 
-		result, err := transactions.PreviewImport(r.Context(), userID, strings.NewReader(csvText))
+		result, err := imports.Preview(r.Context(), userID, table, sheets, service.ImportOptions{
+			Filename: filename,
+			Sheet:    table.Name,
+			Mode:     mode,
+		})
 		if err != nil {
-			respondServiceError(w, err)
+			respondImportError(w, err)
 			return
 		}
-		result.Sheet = table.Name
-		result.Sheets = workbookNames(sheets)
-
 		respondJSON(w, http.StatusOK, result)
 	}
 }
 
-func handleImportTransactions(transactions TransactionService) http.HandlerFunc {
+func handleImportTransactions(imports ImportService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID, err := userIDFromContext(r.Context())
 		if err != nil {
@@ -469,30 +475,59 @@ func handleImportTransactions(transactions TransactionService) http.HandlerFunc 
 			return
 		}
 
-		csvText, err := table.ToCSV()
+		mapping, err := parseImportMapping(r)
 		if err != nil {
-			respondError(w, http.StatusBadRequest, "unable to read the uploaded file")
+			respondImportError(w, err)
 			return
 		}
 
-		result, err := transactions.ImportTransactions(r.Context(), userID, strings.NewReader(csvText))
+		result, err := imports.Import(r.Context(), userID, table, sheets, service.ImportOptions{
+			Filename: filename,
+			Sheet:    table.Name,
+			Mode:     importModeFromRequest(r),
+			Mapping:  mapping,
+		})
 		if err != nil {
-			respondServiceError(w, err)
+			respondImportError(w, err)
 			return
 		}
-		result.Sheet = table.Name
-		result.Sheets = workbookNames(sheets)
-
 		respondJSON(w, http.StatusOK, result)
 	}
 }
 
-func workbookNames(names []string) []string {
-	if names == nil {
-		return []string{}
+func importModeFromRequest(r *http.Request) service.ImportMode {
+	if strings.EqualFold(strings.TrimSpace(r.FormValue("mode")), "strict") {
+		return service.ImportModeStrict
 	}
+	return service.ImportModeAI
+}
 
-	return names
+func parseImportMapping(r *http.Request) (*model.ImportMapping, error) {
+	raw := r.FormValue("mapping")
+	if raw == "" {
+		return nil, nil
+	}
+	if len(raw) > service.MaxMappingBytes {
+		return nil, fmt.Errorf("%w: mapping exceeds 32 KB", service.ErrInvalidMapping)
+	}
+	var mapping model.ImportMapping
+	if err := json.Unmarshal([]byte(raw), &mapping); err != nil {
+		return nil, fmt.Errorf("%w: malformed mapping", service.ErrInvalidMapping)
+	}
+	return &mapping, nil
+}
+
+func respondImportError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, service.ErrImportAIUnavailable):
+		respondError(w, http.StatusBadGateway, "AI could not read this sheet. Try again.")
+	case errors.Is(err, service.ErrInvalidMapping),
+		errors.Is(err, service.ErrImportMissingColumns),
+		errors.Is(err, service.ErrImportTooManyRows):
+		respondError(w, http.StatusBadRequest, err.Error())
+	default:
+		respondServiceError(w, err)
+	}
 }
 
 func selectImportSheet(r *http.Request, file multipart.File, filename string) (*spreadsheet.Table, []string, error) {
@@ -726,7 +761,8 @@ func respondServiceError(w http.ResponseWriter, err error) {
 		errors.Is(err, service.ErrInvalidType),
 		errors.Is(err, service.ErrInvalidName),
 		errors.Is(err, service.ErrInvalidCurrency),
-		errors.Is(err, service.ErrImportTooManyRows):
+		errors.Is(err, service.ErrImportTooManyRows),
+		errors.Is(err, service.ErrImportMissingColumns):
 		respondError(w, http.StatusBadRequest, err.Error())
 	default:
 		respondError(w, http.StatusInternalServerError, "internal server error")

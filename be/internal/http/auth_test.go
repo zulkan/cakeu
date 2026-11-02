@@ -40,7 +40,7 @@ func (f *fakeAuthService) ResetPassword(ctx context.Context, req model.ResetPass
 }
 
 func newAuthTestHandler(auth *fakeAuthService) http.Handler {
-	return httpserver.NewHandler(service.NewHealth(nil), auth, &fakeAccountService{}, &fakeCategoryService{}, &fakeTransactionService{}, nil, nil, nil, nil, testJWTSecret, nil)
+	return httpserver.NewHandler(service.NewHealth(nil), auth, &fakeAccountService{}, &fakeCategoryService{}, &fakeTransactionService{}, nil, nil, nil, nil, nil, testJWTSecret, nil)
 }
 
 func TestAuthRoutesReachableWithoutJWTAndProtectedRoutes401(t *testing.T) {
