@@ -76,13 +76,14 @@ const importMapping: ImportMapping = {
   data_start: 2,
   data_end: 3,
   fields: {
-    date: { column: 1 },
-    amount: { column: 3 },
-    description: { column: 4 },
+    date: { column: 1, date_format: 'iso' },
+    amount: { column: 3, amount_format: 'plain', amount_mode: 'abs' },
+    description: { column: 4, carry_forward: true },
     account: { column: 5 },
-    category: { column: 6 },
+    category: { column: 6, value_map: { Food: 'Groceries' } },
   },
   type: { column: 2 },
+  confidence: 0.86,
 };
 
 const importPreview: ImportResult = {
@@ -461,6 +462,7 @@ describe('Transactions page', () => {
     expect(within(summary).getByText('3')).toBeInTheDocument();
     expect(within(summary).getByText('2')).toBeInTheDocument();
     expect(within(summary).getByText('1')).toBeInTheDocument();
+    expect(within(summary).getByText('Skipped')).toBeInTheDocument();
     expect(within(dialog).getByText('Row 4')).toBeInTheDocument();
     expect(
       within(dialog).getByText(/unknown account "Cash"/)
@@ -482,6 +484,18 @@ describe('Transactions page', () => {
 
     await within(dialog).findByText(/AI mapping/i);
     expect(within(dialog).getByText(/header row 1/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/data rows 2–3/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/date iso/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/amount plain/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/mode abs/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/carry forward/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/Food → Groceries/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/confidence 86%/i)).toBeInTheDocument();
+
+    const toggle = within(dialog).getByRole('button', { name: /AI mapping/i });
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await user.click(toggle);
+    expect(within(dialog).queryByText(/data rows 2–3/i)).not.toBeInTheDocument();
 
     await user.click(
       within(dialog).getByRole('button', { name: /import transactions/i })
@@ -495,25 +509,65 @@ describe('Transactions page', () => {
     );
   });
 
-  it('falls back to a standard import when AI previewing fails', async () => {
-    vi.spyOn(api, 'previewImport')
-      .mockRejectedValueOnce(new Error('AI mapping failed'))
-      .mockResolvedValueOnce(importPreview);
-    const { user, dialog } = await openImportDialog();
-    const file = csvFile();
-
-    await user.upload(within(dialog).getByLabelText(/csv file/i), file);
+  it('shows the privacy note before uploading a file', async () => {
+    const preview = vi.spyOn(api, 'previewImport');
+    const { dialog } = await openImportDialog();
 
     expect(
-      await within(dialog).findByText('AI mapping failed')
+      within(dialog).getByText(/account\/category names are sent to the AI provider/i)
     ).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(/nothing is imported until you confirm/i)
+    ).toBeInTheDocument();
+    expect(preview).not.toHaveBeenCalled();
+  });
+
+  it('keeps the selected sheet after an AI failure and retries it', async () => {
+    vi.spyOn(api, 'previewImport')
+      .mockResolvedValueOnce(workbookPreview)
+      .mockRejectedValueOnce(new Error('AI mapping failed'))
+      .mockResolvedValueOnce(februaryPreview);
+    const { user, dialog } = await openImportDialog();
+    const file = xlsxFile();
+
+    await user.upload(within(dialog).getByLabelText(/csv file/i), file);
+    await within(dialog).findByLabelText('Import summary');
+    await user.selectOptions(within(dialog).getByLabelText('Sheet'), 'February');
+
+    expect(await within(dialog).findByText('AI mapping failed')).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Sheet')).toHaveValue('February');
+
+    await user.click(within(dialog).getByRole('button', { name: /try again/i }));
+
+    await waitFor(() =>
+      expect(api.previewImport).toHaveBeenLastCalledWith(file, {
+        sheet: 'February',
+        mode: 'ai',
+      })
+    );
+    expect(await within(dialog).findByLabelText('Import summary')).toBeInTheDocument();
+  });
+
+  it('standard import after an AI failure targets the selected sheet', async () => {
+    vi.spyOn(api, 'previewImport')
+      .mockResolvedValueOnce(workbookPreview)
+      .mockRejectedValueOnce(new Error('AI mapping failed'))
+      .mockResolvedValueOnce({ ...februaryPreview, mode: 'strict', mapping: undefined });
+    const { user, dialog } = await openImportDialog();
+    const file = xlsxFile();
+
+    await user.upload(within(dialog).getByLabelText(/csv file/i), file);
+    await within(dialog).findByLabelText('Import summary');
+    await user.selectOptions(within(dialog).getByLabelText('Sheet'), 'February');
+
+    expect(await within(dialog).findByText('AI mapping failed')).toBeInTheDocument();
     await user.click(
       within(dialog).getByRole('button', { name: /standard import/i })
     );
 
     await waitFor(() =>
       expect(api.previewImport).toHaveBeenLastCalledWith(file, {
-        sheet: undefined,
+        sheet: 'February',
         mode: 'strict',
       })
     );
@@ -635,6 +689,80 @@ describe('Transactions page', () => {
     expect(within(summary).getByText('4')).toBeInTheDocument();
     expect(within(dialog).getByText('Lunch')).toBeInTheDocument();
     expect(within(dialog).getByLabelText('Sheet')).toHaveValue('February');
+  });
+
+  it('omits the mapping for a strict commit', async () => {
+    vi.spyOn(api, 'previewImport').mockResolvedValue({
+      ...importPreview,
+      mode: 'strict',
+      mapping: undefined,
+    });
+    const importTransactions = vi
+      .spyOn(api, 'importTransactions')
+      .mockResolvedValue({
+        total: 2,
+        valid: 2,
+        invalid: 0,
+        skipped: 0,
+        sheet: 'csv',
+        sheets: ['csv'],
+        mode: 'strict',
+        errors: [],
+        preview: [],
+      });
+    const { user, dialog } = await openImportDialog();
+    const file = csvFile();
+
+    await user.upload(within(dialog).getByLabelText(/csv file/i), file);
+    await within(dialog).findByLabelText('Import summary');
+
+    const commit = within(dialog).getByRole('button', {
+      name: /import transactions/i,
+    });
+    await waitFor(() => expect(commit).toBeEnabled());
+    await user.click(commit);
+
+    await waitFor(() => expect(importTransactions).toHaveBeenCalled());
+    const [, options] = importTransactions.mock.calls[0];
+    expect(options).toEqual(
+      expect.objectContaining({ sheet: 'csv', mode: 'strict' })
+    );
+    expect(options).not.toHaveProperty('mapping');
+  });
+
+  it('distinguishes invalid rows from skipped rows after importing', async () => {
+    vi.spyOn(api, 'previewImport').mockResolvedValue({
+      ...importPreview,
+      invalid: 1,
+      skipped: 2,
+    });
+    vi.spyOn(api, 'importTransactions').mockResolvedValue({
+      total: 3,
+      valid: 2,
+      invalid: 1,
+      skipped: 2,
+      sheet: 'csv',
+      sheets: ['csv'],
+      mode: 'ai',
+      errors: [],
+      preview: [],
+    });
+    const { user, dialog } = await openImportDialog();
+
+    await user.upload(within(dialog).getByLabelText(/csv file/i), csvFile());
+    await within(dialog).findByLabelText('Import summary');
+    const commit = within(dialog).getByRole('button', {
+      name: /import transactions/i,
+    });
+    await waitFor(() => expect(commit).toBeEnabled());
+    await user.click(commit);
+
+    expect(
+      await within(dialog).findByText(/1 row could not be imported/i)
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(/2 rows were skipped as non-transaction rows/i)
+    ).toBeInTheDocument();
   });
 
   it('commits the selected sheet of a multi-sheet workbook', async () => {

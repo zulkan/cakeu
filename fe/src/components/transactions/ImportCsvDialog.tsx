@@ -1,7 +1,18 @@
 import { useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
-import { AlertCircle, CheckCircle2, FileUp, Loader2 } from 'lucide-react';
-import type { ImportMapping, ImportMode, ImportResult } from '../../types';
+import {
+  AlertCircle,
+  CheckCircle2,
+  ChevronDown,
+  FileUp,
+  Loader2,
+} from 'lucide-react';
+import type {
+  ImportFieldRule,
+  ImportMapping,
+  ImportMode,
+  ImportResult,
+} from '../../types';
 import { api } from '../../lib/api';
 import { cn } from '../../lib/cn';
 import { formatCurrency, formatDate } from '../../lib/format';
@@ -24,6 +35,22 @@ function messageFor(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
+function ruleDetails(rule: ImportFieldRule): string {
+  const details: string[] = [];
+  if (rule.date_format) details.push(`date ${rule.date_format}`);
+  if (rule.amount_format) details.push(`amount ${rule.amount_format}`);
+  if (rule.amount_mode) details.push(`mode ${rule.amount_mode}`);
+  if (rule.carry_forward) details.push('carry forward');
+  if (rule.value_map && Object.keys(rule.value_map).length > 0) {
+    details.push(
+      `value_map ${Object.entries(rule.value_map)
+        .map(([from, to]) => `${from} → ${to}`)
+        .join(', ')}`
+    );
+  }
+  return details.join('; ');
+}
+
 export function ImportCsvDialog({
   open,
   currency,
@@ -38,6 +65,7 @@ export function ImportCsvDialog({
   const [sheets, setSheets] = useState<string[]>([]);
   const [mapping, setMapping] = useState<ImportMapping | null>(null);
   const [mode, setMode] = useState<ImportMode>('ai');
+  const [mappingOpen, setMappingOpen] = useState(true);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [isCommitting, setIsCommitting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -53,6 +81,7 @@ export function ImportCsvDialog({
     setSheets([]);
     setMapping(null);
     setMode('ai');
+    setMappingOpen(true);
     setIsPreviewing(false);
     setIsCommitting(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -85,9 +114,9 @@ export function ImportCsvDialog({
       setMode(result.mode ?? nextMode);
     } catch (failure) {
       if (requestId.current === currentRequest) {
+        // Keep the workbook's sheet list and selection so Try again and
+        // Standard import retry the sheet the user actually chose.
         setPreview(null);
-        setSheets([]);
-        setSelectedSheet(null);
         setMapping(null);
         setError(messageFor(failure, 'Unable to preview this file'));
       }
@@ -107,6 +136,7 @@ export function ImportCsvDialog({
     setSheets([]);
     setMapping(null);
     setMode('ai');
+    setMappingOpen(true);
 
     if (!selected) {
       requestId.current += 1;
@@ -134,7 +164,7 @@ export function ImportCsvDialog({
       const result = await api.importTransactions(file, {
         sheet: selectedSheet ?? undefined,
         mode,
-        mapping: mapping ?? undefined,
+        ...(mode === 'ai' && mapping ? { mapping } : {}),
       });
       setSuccess(result);
       await onImported();
@@ -221,7 +251,15 @@ export function ImportCsvDialog({
             {success.invalid > 0 && (
               <p className="mt-1 text-sm text-expense">
                 {success.invalid}{' '}
-                {success.invalid === 1 ? 'row was' : 'rows were'} skipped.
+                {success.invalid === 1 ? 'row could' : 'rows could'} not be
+                imported.
+              </p>
+            )}
+            {success.skipped > 0 && (
+              <p className="mt-1 text-sm text-stone-600">
+                {success.skipped}{' '}
+                {success.skipped === 1 ? 'row was' : 'rows were'} skipped as
+                non-transaction rows.
               </p>
             )}
           </div>
@@ -249,6 +287,11 @@ export function ImportCsvDialog({
               One .csv, .xlsx, or .xls file up to 5 MB and 5,000 rows per sheet.
               AI maps the columns; you can confirm the mapping before anything
               is imported.
+            </p>
+            <p className={hintClass}>
+              A sample of the selected sheet and your account/category names
+              are sent to the AI provider to map columns. Nothing is imported
+              until you confirm.
             </p>
           </div>
 
@@ -297,42 +340,99 @@ export function ImportCsvDialog({
             </p>
           )}
 
-          {error && file && mode === 'ai' && (
-            <Button
-              variant="secondary"
-              onClick={() => void handleStandardImport()}
-            >
-              Standard import
-            </Button>
+          {error && file && (
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Button
+                variant="secondary"
+                onClick={() =>
+                  void runPreview(file, selectedSheet ?? undefined, mode)
+                }
+                disabled={isPreviewing || isCommitting}
+              >
+                Try again
+              </Button>
+              {mode === 'ai' && (
+                <Button
+                  variant="secondary"
+                  onClick={() => void handleStandardImport()}
+                  disabled={isPreviewing || isCommitting}
+                >
+                  Standard import
+                </Button>
+              )}
+            </div>
           )}
 
           {mode === 'ai' && previewMapping && (
             <section className="space-y-2 rounded-xl border border-brand-200 bg-brand-50/40 p-3">
-              <h3 className="text-sm font-semibold text-stone-800">AI mapping</h3>
-              <p className={hintClass}>
-                Header row {previewMapping.header_row || '—'}; data rows{' '}
-                {previewMapping.data_start}–{previewMapping.data_end}. AI read a
-                sample of this sheet to map the columns. Nothing is imported
-                until you confirm.
-              </p>
-              <ul className="space-y-1 text-sm text-stone-700">
-                {mappingRows.map(([field, rule]) => (
-                  <li key={field}>
-                    <span className="font-semibold">{field}</span>
-                    {' → '}
-                    {rule.column ? `column ${rule.column}` : rule.constant}
-                  </li>
-                ))}
-                <li>
-                  <span className="font-semibold">type</span>
-                  {' → '}
-                  {previewMapping.type.column
-                    ? `column ${previewMapping.type.column}`
-                    : previewMapping.type.constant}
-                </li>
-              </ul>
-              {previewMapping.notes && (
-                <p className={hintClass}>{previewMapping.notes}</p>
+              <button
+                type="button"
+                onClick={() => setMappingOpen((open) => !open)}
+                aria-expanded={mappingOpen}
+                className="flex w-full items-center justify-between gap-2 text-left"
+              >
+                <span className="text-sm font-semibold text-stone-800">
+                  AI mapping
+                </span>
+                <ChevronDown
+                  className={cn(
+                    'h-4 w-4 text-stone-500 transition-transform',
+                    mappingOpen && 'rotate-180'
+                  )}
+                  aria-hidden="true"
+                />
+              </button>
+              {mappingOpen && (
+                <div className="space-y-2">
+                  <p className={hintClass}>
+                    Header row {previewMapping.header_row || '—'}; data rows{' '}
+                    {previewMapping.data_start}–{previewMapping.data_end}. AI
+                    read a sample of this sheet to map the columns. Nothing is
+                    imported until you confirm.
+                  </p>
+                  <ul className="space-y-1 text-sm text-stone-700">
+                    {mappingRows.map(([field, rule]) => (
+                      <li key={field}>
+                        <span className="font-semibold">{field}</span>
+                        {' → '}
+                        {rule.column ? `column ${rule.column}` : rule.constant}
+                        {ruleDetails(rule) && (
+                          <span className="text-stone-500">
+                            {' '}
+                            ({ruleDetails(rule)})
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                    <li>
+                      <span className="font-semibold">type</span>
+                      {' → '}
+                      {previewMapping.type.column
+                        ? `column ${previewMapping.type.column}`
+                        : previewMapping.type.constant}
+                      {previewMapping.type.value_map &&
+                        Object.keys(previewMapping.type.value_map).length > 0 && (
+                          <span className="text-stone-500">
+                            {' '}
+                            (value_map{' '}
+                            {Object.entries(previewMapping.type.value_map)
+                              .map(([from, to]) => `${from} → ${to}`)
+                              .join(', ')}
+                            )
+                          </span>
+                        )}
+                    </li>
+                  </ul>
+                  {typeof previewMapping.confidence === 'number' && (
+                    <p className={hintClass}>
+                      Confidence{' '}
+                      {Math.round(previewMapping.confidence * 100)}%.
+                    </p>
+                  )}
+                  {previewMapping.notes && (
+                    <p className={hintClass}>{previewMapping.notes}</p>
+                  )}
+                </div>
               )}
             </section>
           )}
