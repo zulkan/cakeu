@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -163,5 +164,59 @@ func TestImportServiceRejectsSheetMismatch(t *testing.T) {
 		service.ImportOptions{Filename: "x.xlsx", Sheet: "JANUARI", Mode: service.ImportModeAI, Mapping: plan})
 	if !errors.Is(err, service.ErrInvalidMapping) {
 		t.Fatalf("expected ErrInvalidMapping, got %v", err)
+	}
+}
+
+func TestImportServiceCommitRejectsUnknownAccountConstant(t *testing.T) {
+	plan := januariMapping()
+	plan.Fields.Account = model.ImportFieldRule{Constant: "Missing account"}
+	imports, _, _ := newImportServiceForTest(t, &stubImportLLM{})
+
+	_, err := imports.Import(context.Background(), uuid.New(), januariTable(), []string{"JANUARI"},
+		service.ImportOptions{Filename: "x.xlsx", Sheet: "JANUARI", Mode: service.ImportModeAI, Mapping: plan})
+	if !errors.Is(err, service.ErrInvalidMapping) {
+		t.Fatalf("expected ErrInvalidMapping, got %v", err)
+	}
+}
+
+func TestImportServiceCommitRejectsWrongTypeCategoryConstant(t *testing.T) {
+	plan := januariMapping()
+	plan.Fields.Category = model.ImportFieldRule{Constant: "Saving"}
+	plan.Type = model.ImportTypeRule{Constant: "income"}
+	imports, _, _ := newImportServiceForTest(t, &stubImportLLM{})
+
+	_, err := imports.Import(context.Background(), uuid.New(), januariTable(), []string{"JANUARI"},
+		service.ImportOptions{Filename: "x.xlsx", Sheet: "JANUARI", Mode: service.ImportModeAI, Mapping: plan})
+	if !errors.Is(err, service.ErrInvalidMapping) {
+		t.Fatalf("expected ErrInvalidMapping, got %v", err)
+	}
+}
+
+func TestImportServiceReturnsUnavailableOnTransportError(t *testing.T) {
+	imports, _, _ := newImportServiceForTest(t, &stubImportLLM{err: errors.New("dial timeout")})
+
+	_, err := imports.Preview(context.Background(), uuid.New(), januariTable(), []string{"JANUARI"},
+		service.ImportOptions{Filename: "x.xlsx", Sheet: "JANUARI", Mode: service.ImportModeAI})
+	if !errors.Is(err, service.ErrImportAIUnavailable) {
+		t.Fatalf("expected ErrImportAIUnavailable, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "dial timeout") {
+		t.Fatalf("expected the cause to be preserved, got %v", err)
+	}
+}
+
+func TestImportServiceReturnsResolvedDataRange(t *testing.T) {
+	plan := januariMapping()
+	plan.DataStart = 0
+	plan.DataEnd = 0
+	imports, _, _ := newImportServiceForTest(t, &stubImportLLM{})
+
+	result, err := imports.Import(context.Background(), uuid.New(), januariTable(), []string{"JANUARI"},
+		service.ImportOptions{Filename: "x.xlsx", Sheet: "JANUARI", Mode: service.ImportModeAI, Mapping: plan})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if result.Mapping == nil || result.Mapping.DataStart != 8 || result.Mapping.DataEnd != 12 {
+		t.Fatalf("expected resolved data range 8-12, got %+v", result.Mapping)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"goskeleton/internal/model"
 	"goskeleton/internal/spreadsheet"
@@ -94,13 +95,13 @@ func resolveMapping(plan *model.ImportMapping, table *spreadsheet.Table) (*resol
 		dataStart = plan.HeaderRow + 1
 	}
 	if dataStart < 1 {
-		dataStart = 1
+		return nil, fmt.Errorf("%w: data_start %d is out of range", ErrInvalidMapping, plan.DataStart)
 	}
 	dataEnd := plan.DataEnd
 	if dataEnd == 0 {
 		dataEnd = len(table.Rows)
 	}
-	if dataStart > dataEnd || dataEnd > len(table.Rows) {
+	if dataEnd < 1 || dataStart > dataEnd || dataEnd > len(table.Rows) {
 		return nil, fmt.Errorf("%w: data range %d-%d is invalid", ErrInvalidMapping, dataStart, dataEnd)
 	}
 
@@ -134,7 +135,7 @@ func resolveMapping(plan *model.ImportMapping, table *spreadsheet.Table) (*resol
 		return nil, err
 	}
 
-	if len(plan.Notes) > maxMappingNotesLen {
+	if utf8.RuneCountInString(plan.Notes) > maxMappingNotesLen {
 		return nil, fmt.Errorf("%w: notes are too long", ErrInvalidMapping)
 	}
 	if plan.Confidence < 0 || plan.Confidence > 1 {
@@ -148,10 +149,20 @@ func validateFieldRule(name string, rule model.ImportFieldRule, required bool, m
 	if rule.Column < 0 || rule.Column > maxColumns {
 		return fmt.Errorf("%w: %s column %d is out of range", ErrInvalidMapping, name, rule.Column)
 	}
-	if rule.Column == 0 && strings.TrimSpace(rule.Constant) == "" && required {
+	if name == "date" || name == "amount" {
+		if rule.Column < 1 {
+			return fmt.Errorf("%w: %s must map to a column", ErrInvalidMapping, name)
+		}
+		if strings.TrimSpace(rule.Constant) != "" {
+			return fmt.Errorf("%w: %s must not use a constant", ErrInvalidMapping, name)
+		}
+		if len(rule.ValueMap) > 0 {
+			return fmt.Errorf("%w: %s must not use value_map", ErrInvalidMapping, name)
+		}
+	} else if rule.Column == 0 && strings.TrimSpace(rule.Constant) == "" && required {
 		return fmt.Errorf("%w: %s needs a column or a constant", ErrInvalidMapping, name)
 	}
-	if len(rule.Constant) > maxMappingStringLen {
+	if utf8.RuneCountInString(rule.Constant) > maxMappingStringLen {
 		return fmt.Errorf("%w: %s constant is too long", ErrInvalidMapping, name)
 	}
 	if len(rule.DateFormat) > maxMappingStringLen || !validDateFormats[rule.DateFormat] {
@@ -167,13 +178,8 @@ func validateFieldRule(name string, rule model.ImportFieldRule, required bool, m
 		return fmt.Errorf("%w: %s value_map is too large", ErrInvalidMapping, name)
 	}
 	for source, target := range rule.ValueMap {
-		if len(source) > maxMappingStringLen || len(target) > maxMappingStringLen || strings.TrimSpace(target) == "" {
+		if utf8.RuneCountInString(source) > maxMappingStringLen || utf8.RuneCountInString(target) > maxMappingStringLen || strings.TrimSpace(target) == "" {
 			return fmt.Errorf("%w: %s value_map entry is invalid", ErrInvalidMapping, name)
-		}
-	}
-	if name == "date" && rule.Column == 0 {
-		if _, err := time.Parse("2006-01-02", strings.TrimSpace(rule.Constant)); err != nil {
-			return fmt.Errorf("%w: date constant must be YYYY-MM-DD", ErrInvalidMapping)
 		}
 	}
 	return nil
@@ -190,8 +196,12 @@ func validateTypeRule(rule model.ImportTypeRule, maxColumns int) error {
 		return fmt.Errorf("%w: type value_map is too large", ErrInvalidMapping)
 	}
 	for source, target := range rule.ValueMap {
-		if len(source) > maxMappingStringLen || len(target) > maxMappingStringLen || strings.TrimSpace(target) == "" {
+		if utf8.RuneCountInString(source) > maxMappingStringLen || utf8.RuneCountInString(target) > maxMappingStringLen || strings.TrimSpace(target) == "" {
 			return fmt.Errorf("%w: type value_map entry is invalid", ErrInvalidMapping)
+		}
+		target = strings.ToLower(strings.TrimSpace(target))
+		if target != TypeIncome && target != TypeExpense {
+			return fmt.Errorf("%w: type value_map target must be income or expense", ErrInvalidMapping)
 		}
 	}
 	return nil
@@ -351,7 +361,7 @@ func normalizeDate(raw, format string) string {
 			}
 		}
 	case "mdy":
-		for _, layout := range []string{"01/02/2006", "1/2/2006", "01-02-2006"} {
+		for _, layout := range []string{"01/02/2006", "1/2/2006", "01-02-2006", "1-2-2006"} {
 			if parsed, err := time.Parse(layout, raw); err == nil {
 				return parsed.Format("2006-01-02")
 			}
@@ -382,7 +392,11 @@ func parseMonthNameDate(raw string) (time.Time, bool) {
 	if !ok {
 		return time.Time{}, false
 	}
-	year, err := strconv.Atoi(fields[2])
+	yearField := fields[2]
+	if len(yearField) < 4 {
+		return time.Time{}, false
+	}
+	year, err := strconv.Atoi(yearField)
 	if err != nil {
 		return time.Time{}, false
 	}
@@ -412,11 +426,13 @@ func normalizeAmount(raw, format, mode string) string {
 	case "currency_en":
 		value = strings.NewReplacer("$", "", "USD", "", " ", "", ",", "").Replace(value)
 	case "plain", "":
-		value = strings.ReplaceAll(value, ",", ".")
+		if ambiguousPlainAmount(value) {
+			return raw
+		}
 	}
 
 	number, err := strconv.ParseFloat(value, 64)
-	if err != nil {
+	if err != nil || math.IsNaN(number) || math.IsInf(number, 0) {
 		return raw
 	}
 
@@ -427,4 +443,21 @@ func normalizeAmount(raw, format, mode string) string {
 		number = -number
 	}
 	return strconv.FormatFloat(number, 'f', -1, 64)
+}
+
+// ambiguousPlainAmount reports values whose separators could mean either
+// decimal or thousands grouping. Plain amounts must be unambiguous; the
+// caller keeps the raw text so the strict validator rejects it instead of
+// silently importing a value that is off by 1000x.
+func ambiguousPlainAmount(value string) bool {
+	if strings.Contains(value, ",") {
+		return true
+	}
+	trimmed := strings.TrimPrefix(strings.TrimPrefix(value, "+"), "-")
+	dot := strings.IndexByte(trimmed, '.')
+	if dot < 0 || dot != strings.LastIndexByte(trimmed, '.') {
+		return false
+	}
+	integer, fraction := trimmed[:dot], trimmed[dot+1:]
+	return len(integer) >= 1 && len(integer) <= 3 && len(fraction) == 3
 }

@@ -92,6 +92,22 @@ func TestValidateMappingRejectsBadPlans(t *testing.T) {
 		{"constant date invalid", func(m *model.ImportMapping) {
 			m.Fields.Date = model.ImportFieldRule{Constant: "14/01/2026"}
 		}},
+		{"date constant is not allowed", func(m *model.ImportMapping) {
+			m.Fields.Date = model.ImportFieldRule{Constant: "2026-01-14"}
+		}},
+		{"amount constant is not allowed", func(m *model.ImportMapping) {
+			m.Fields.Amount = model.ImportFieldRule{Constant: "1500"}
+		}},
+		{"date value_map is not allowed", func(m *model.ImportMapping) {
+			m.Fields.Date.ValueMap = map[string]string{"14/01/2026": "2026-01-14"}
+		}},
+		{"amount value_map is not allowed", func(m *model.ImportMapping) {
+			m.Fields.Amount.ValueMap = map[string]string{"1.500": "1500"}
+		}},
+		{"negative data_start", func(m *model.ImportMapping) { m.DataStart = -1 }},
+		{"type value_map target must be an enum", func(m *model.ImportMapping) {
+			m.Type = model.ImportTypeRule{Column: 2, ValueMap: map[string]string{"in": "transfer"}}
+		}},
 	}
 
 	for _, tc := range tests {
@@ -168,5 +184,93 @@ func TestRenumberImportResult(t *testing.T) {
 	service.RenumberImportResult(result, []int{9, 12})
 	if result.Errors[0].Row != 9 || result.Preview[0].Row != 9 {
 		t.Fatalf("expected row 9, got %+v", result)
+	}
+}
+
+func TestNormalizeDateAndAmountEnums(t *testing.T) {
+	tests := []struct {
+		name       string
+		date       string
+		dateFormat string
+		amount     string
+		amountFmt  string
+		mode       string
+		wantDate   string
+		wantAmount string
+	}{
+		{"mdy dashes", "1-2-2026", "mdy", "42.5", "plain", "", "2026-01-02", "42.5"},
+		{"day month name id", "14 Jan 26", "d_mon_y_id", "1500", "plain", "", "14 Jan 26", "1500"},
+		{"day month name id long", "31 Desember 2026", "d_mon_y_id", "1500", "plain", "", "2026-12-31", "1500"},
+		{"id grouped", "2026-01-01", "iso", "1.234.567", "id_grouped", "", "2026-01-01", "1234567"},
+		{"en grouped", "2026-01-01", "iso", "1,234.56", "en_grouped", "abs", "2026-01-01", "1234.56"},
+		{"currency en", "2026-01-01", "iso", "$1,234.56", "currency_en", "negate", "2026-01-01", "-1234.56"},
+		{"abs mode", "2026-01-01", "iso", "-42.5", "plain", "abs", "2026-01-01", "42.5"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			table := &spreadsheet.Table{
+				Name: "Sheet1",
+				Rows: [][]string{
+					{"Date", "Amount"},
+					{tc.date, tc.amount},
+				},
+			}
+			plan := &model.ImportMapping{
+				Sheet: "Sheet1", HeaderRow: 1, DataStart: 2, DataEnd: 2,
+				Fields: model.ImportFields{
+					Date:     model.ImportFieldRule{Column: 1, DateFormat: tc.dateFormat},
+					Amount:   model.ImportFieldRule{Column: 2, AmountFormat: tc.amountFmt, AmountMode: tc.mode},
+					Account:  model.ImportFieldRule{Column: 1},
+					Category: model.ImportFieldRule{Column: 2},
+				},
+				Type: model.ImportTypeRule{Constant: "expense"},
+			}
+
+			csvText, _, _, err := service.ApplyMapping(plan, table)
+			if err != nil {
+				t.Fatalf("ApplyMapping: %v", err)
+			}
+			want := tc.wantDate + ",expense," + tc.wantAmount
+			if !strings.Contains(csvText, want) {
+				t.Fatalf("expected %q in %q", want, csvText)
+			}
+		})
+	}
+}
+
+func TestApplyMappingPlainAmountDoesNotGuessGrouping(t *testing.T) {
+	table := &spreadsheet.Table{
+		Name: "Sheet1",
+		Rows: [][]string{
+			{"Date", "Amount"},
+			{"2026-01-01", "12,345"},
+			{"2026-01-02", "1.500"},
+			{"2026-01-03", "42.5"},
+		},
+	}
+	plan := &model.ImportMapping{
+		Sheet: "Sheet1", HeaderRow: 1, DataStart: 2, DataEnd: 4,
+		Fields: model.ImportFields{
+			Date:     model.ImportFieldRule{Column: 1, DateFormat: "iso"},
+			Amount:   model.ImportFieldRule{Column: 2, AmountFormat: "plain"},
+			Account:  model.ImportFieldRule{Column: 1},
+			Category: model.ImportFieldRule{Column: 2},
+		},
+		Type: model.ImportTypeRule{Constant: "expense"},
+	}
+
+	csvText, _, _, err := service.ApplyMapping(plan, table)
+	if err != nil {
+		t.Fatalf("ApplyMapping: %v", err)
+	}
+	if !strings.Contains(csvText, "2026-01-01,expense,\"12,345\"") {
+		t.Fatalf("comma-grouped plain value must stay raw: %q", csvText)
+	}
+	if !strings.Contains(csvText, "2026-01-02,expense,1.500") {
+		t.Fatalf("ambiguous plain value must stay raw: %q", csvText)
+	}
+	if !strings.Contains(csvText, "2026-01-03,expense,42.5") {
+		t.Fatalf("plain decimal should still parse: %q", csvText)
 	}
 }

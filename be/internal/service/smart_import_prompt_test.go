@@ -1,9 +1,11 @@
 package service
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
+	"goskeleton/internal/model"
 	"goskeleton/internal/spreadsheet"
 )
 
@@ -118,5 +120,57 @@ func TestSampleRowNumbersDistributesAcrossSheet(t *testing.T) {
 	}
 	if maxGap > 8 {
 		t.Fatalf("largest gap between sampled rows is %d (> 8): %v", maxGap, got)
+	}
+}
+
+func TestBuildImportMappingRequestCapsUserPayload(t *testing.T) {
+	rows := make([][]string, 0, 50)
+	for i := 0; i < 50; i++ {
+		row := make([]string, 50)
+		for j := range row {
+			row[j] = strings.Repeat("wide ", 40)
+		}
+		rows = append(rows, row)
+	}
+	table := &spreadsheet.Table{Name: "WIDE", Rows: rows}
+
+	accounts := make([]model.Account, 0, 100)
+	for i := 0; i < 100; i++ {
+		accounts = append(accounts, model.Account{Name: "Account " + strings.Repeat("x", 20)})
+	}
+	categories := make([]model.Category, 0, 100)
+	for i := 0; i < 100; i++ {
+		categories = append(categories, model.Category{Name: "Category " + strings.Repeat("y", 20), Type: "expense"})
+	}
+
+	request := buildImportMappingRequest("wide.xlsx", table, accounts, categories, 50)
+	payload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if len(payload) > maxImportMappingPayloadBytes {
+		t.Fatalf("payload is %d bytes, want <= %d", len(payload), maxImportMappingPayloadBytes)
+	}
+	if request.Sheet != "WIDE" {
+		t.Fatalf("expected the sheet name to survive, got %q", request.Sheet)
+	}
+	if len(request.Sample) == 0 {
+		t.Fatal("expected at least one sample row")
+	}
+	if request.Sample[0].Row != 1 {
+		t.Fatalf("expected the first sample to be kept, got row %d", request.Sample[0].Row)
+	}
+	if request.Sample[len(request.Sample)-1].Row != 50 {
+		t.Fatalf("expected the last sample to be kept, got row %d", request.Sample[len(request.Sample)-1].Row)
+	}
+	if !request.Truncated {
+		t.Fatal("expected the request to be marked truncated")
+	}
+}
+
+func TestTruncateStringKeepsRunesWhole(t *testing.T) {
+	got := truncateString("ééééé", 3)
+	if got != "ééé" {
+		t.Fatalf("expected three whole runes, got %q", got)
 	}
 }

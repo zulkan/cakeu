@@ -15,6 +15,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/xuri/excelize/v2"
 
 	httpserver "goskeleton/internal/http"
 	"goskeleton/internal/model"
@@ -241,11 +242,15 @@ type fakeImportService struct {
 	err         error
 	lastUserID  uuid.UUID
 	lastOptions service.ImportOptions
+	lastTable   *spreadsheet.Table
+	lastSheets  []string
 }
 
 func (f *fakeImportService) Preview(ctx context.Context, userID uuid.UUID, table *spreadsheet.Table, sheets []string, opts service.ImportOptions) (*model.ImportResult, error) {
 	f.lastUserID = userID
 	f.lastOptions = opts
+	f.lastTable = table
+	f.lastSheets = sheets
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -255,6 +260,8 @@ func (f *fakeImportService) Preview(ctx context.Context, userID uuid.UUID, table
 func (f *fakeImportService) Import(ctx context.Context, userID uuid.UUID, table *spreadsheet.Table, sheets []string, opts service.ImportOptions) (*model.ImportResult, error) {
 	f.lastUserID = userID
 	f.lastOptions = opts
+	f.lastTable = table
+	f.lastSheets = sheets
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -1018,5 +1025,158 @@ func TestCORSAllowsAllOriginsWhenWildcardConfigured(t *testing.T) {
 
 	if got := recorder.Header().Get("Access-Control-Allow-Origin"); got != "*" {
 		t.Fatalf("expected allow origin %q, got %q", "*", got)
+	}
+}
+
+func doMultipartUpload(t *testing.T, handler http.Handler, path, token, filename string, content []byte, fields map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, err := writer.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := part.Write(content); err != nil {
+		t.Fatalf("write file body: %v", err)
+	}
+	for key, value := range fields {
+		if err := writer.WriteField(key, value); err != nil {
+			t.Fatalf("write field %s: %v", key, err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, path, body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func TestImportTransactionsForwardsMappingAndMode(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	imports := &fakeImportService{result: &model.ImportResult{Total: 1, Valid: 1, Mode: "ai"}}
+	handler := newTestHandlerWithImports(&fakeAccountService{}, &fakeCategoryService{}, &fakeTransactionService{}, imports, nil)
+
+	mapping := `{"sheet":"transactions.csv","header_row":1,"data_start":2,"data_end":2,"fields":{"date":{"column":1},"amount":{"column":3},"description":{"column":4},"account":{"column":5},"category":{"column":6}},"type":{"column":2}}`
+	recorder := doMultipartUpload(t, handler, "/api/transactions/import", signToken(t, testJWTSecret, userID), "transactions.csv",
+		[]byte("date,type,amount,description,account,category\n2026-10-01,expense,12.50,Coffee,Cash,Food\n"),
+		map[string]string{"confirm": "true", "mode": "ai", "mapping": mapping})
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+	if imports.lastOptions.Mode != service.ImportModeAI {
+		t.Fatalf("expected AI mode, got %q", imports.lastOptions.Mode)
+	}
+	if imports.lastOptions.Mapping == nil || imports.lastOptions.Mapping.Fields.Date.Column != 1 || imports.lastOptions.Mapping.Fields.Amount.Column != 3 {
+		t.Fatalf("expected the mapping to be forwarded, got %+v", imports.lastOptions.Mapping)
+	}
+}
+
+func TestImportTransactionsHonorsStrictMode(t *testing.T) {
+	t.Parallel()
+
+	imports := &fakeImportService{result: &model.ImportResult{Total: 1, Valid: 1, Mode: "strict"}}
+	handler := newTestHandlerWithImports(&fakeAccountService{}, &fakeCategoryService{}, &fakeTransactionService{}, imports, nil)
+
+	recorder := doMultipartUpload(t, handler, "/api/transactions/import", signToken(t, testJWTSecret, uuid.New()), "transactions.csv",
+		[]byte("date,type,amount,description,account,category\n2026-10-01,expense,12.50,Coffee,Cash,Food\n"),
+		map[string]string{"confirm": "true", "mode": "strict"})
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+	if imports.lastOptions.Mode != service.ImportModeStrict {
+		t.Fatalf("expected strict mode, got %q", imports.lastOptions.Mode)
+	}
+}
+
+func TestPreviewImportMapsMissingColumnsTo400(t *testing.T) {
+	t.Parallel()
+
+	imports := &fakeImportService{err: fmt.Errorf("%w: missing column \"date\"", service.ErrImportMissingColumns)}
+	handler := newTestHandlerWithImports(&fakeAccountService{}, &fakeCategoryService{}, &fakeTransactionService{}, imports, nil)
+
+	recorder := doMultipartUpload(t, handler, "/api/transactions/import/preview", signToken(t, testJWTSecret, uuid.New()), "transactions.csv",
+		[]byte("pocket,total\nSaving,100\n"), nil)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "missing column") {
+		t.Fatalf("expected the missing column message, got %q", recorder.Body.String())
+	}
+}
+
+func TestPreviewImportRateLimitReturns429(t *testing.T) {
+	t.Parallel()
+
+	imports := &fakeImportService{result: &model.ImportResult{Total: 1, Valid: 1, Mode: "ai"}}
+	handler := newTestHandlerWithImportMode(imports, service.ImportModeAI, nil)
+	token := signToken(t, testJWTSecret, uuid.New())
+
+	for i := 0; i < 20; i++ {
+		recorder := doMultipartUpload(t, handler, "/api/transactions/import/preview", token, "transactions.csv",
+			[]byte("date,type,amount,description,account,category\n2026-10-01,expense,12.50,Coffee,Cash,Food\n"), nil)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("request %d: expected 200, got %d with body %q", i+1, recorder.Code, recorder.Body.String())
+		}
+	}
+
+	recorder := doMultipartUpload(t, handler, "/api/transactions/import/preview", token, "transactions.csv",
+		[]byte("date,type,amount,description,account,category\n2026-10-01,expense,12.50,Coffee,Cash,Food\n"), nil)
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 on the 21st request, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestPreviewImportParsesXLSXThroughHandler(t *testing.T) {
+	t.Parallel()
+
+	workbook := excelize.NewFile()
+	sheet := "February"
+	workbook.SetSheetName("Sheet1", sheet)
+	rows := [][]any{
+		{"Date", "Type", "Amount", "Description", "Account", "Category"},
+		{"2026-02-01", "expense", 9.5, "Lunch", "Cash", "Food"},
+	}
+	for index, row := range rows {
+		cell, err := excelize.CoordinatesToCellName(1, index+1)
+		if err != nil {
+			t.Fatalf("coordinates: %v", err)
+		}
+		if err := workbook.SetSheetRow(sheet, cell, &row); err != nil {
+			t.Fatalf("set sheet row: %v", err)
+		}
+	}
+	content, err := workbook.WriteToBuffer()
+	if err != nil {
+		t.Fatalf("write workbook: %v", err)
+	}
+
+	imports := &fakeImportService{result: &model.ImportResult{Total: 1, Valid: 1, Mode: "ai", Sheet: sheet, Sheets: []string{sheet}}}
+	handler := newTestHandlerWithImports(&fakeAccountService{}, &fakeCategoryService{}, &fakeTransactionService{}, imports, nil)
+
+	recorder := doMultipartUpload(t, handler, "/api/transactions/import/preview", signToken(t, testJWTSecret, uuid.New()), "transactions.xlsx",
+		content.Bytes(), map[string]string{"sheet": sheet})
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+	if imports.lastTable == nil || imports.lastTable.Name != sheet || len(imports.lastTable.Rows) != 2 {
+		t.Fatalf("expected the XLSX sheet to be parsed, got %+v", imports.lastTable)
+	}
+	if len(imports.lastSheets) != 1 || imports.lastSheets[0] != sheet {
+		t.Fatalf("expected the sheet list, got %v", imports.lastSheets)
 	}
 }

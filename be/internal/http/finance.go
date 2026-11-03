@@ -431,6 +431,7 @@ func handlePreviewImportTransactions(imports ImportService, limiter *rateLimiter
 
 		mode := importModeFromRequest(r)
 		if mode == service.ImportModeAI && limiter != nil && !limiter.allow("import-ai|"+userID.String()) {
+			slog.WarnContext(r.Context(), "import ai preview rate limited", "user_id", userID.String(), "sheet", table.Name)
 			respondError(w, http.StatusTooManyRequests, "too many requests")
 			return
 		}

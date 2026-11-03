@@ -6,10 +6,16 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"goskeleton/internal/llm"
 	"goskeleton/internal/model"
 	"goskeleton/internal/spreadsheet"
+)
+
+const (
+	importMappingUserPrefix      = "Map this spreadsheet. Return only the JSON object.\n\n"
+	maxImportMappingPayloadBytes = 64<<10 - len(importMappingUserPrefix)
 )
 
 const importMappingSystemPrompt = `You map a spreadsheet layout to a fixed transaction import schema.
@@ -24,8 +30,8 @@ Schema:
   "data_end": integer (1-based, 0 = last populated row),
   "skip_rows": array of 1-based row numbers,
   "fields": {
-    "date":        {"column": int, "constant": string, "carry_forward": bool, "date_format": string, "value_map": object},
-    "amount":      {"column": int, "constant": string, "amount_format": string, "amount_mode": string, "value_map": object},
+    "date":        {"column": int, "date_format": string},
+    "amount":      {"column": int, "amount_format": string, "amount_mode": string},
     "description": {"column": int, "constant": string, "carry_forward": bool, "value_map": object},
     "account":     {"column": int, "constant": string, "carry_forward": bool, "value_map": object},
     "category":    {"column": int, "constant": string, "carry_forward": bool, "value_map": object}
@@ -37,7 +43,8 @@ Schema:
 
 Rules:
 - Column numbers are 1-based Excel columns. Row numbers are the row numbers shown in Excel.
-- Each of date, amount, account and category must use a column or a non-empty constant.
+- date and amount must map to a column. They never use a constant or value_map.
+- description, account and category may use a column or a non-empty constant.
 - Use carry_forward for sparse grouping columns whose value applies to the rows below it.
 - date_format is one of: iso, dmy, mdy, d_month_y_id, d_month_y_en, d_mon_y_id, excel_serial.
 - amount_format is one of: plain, id_grouped, en_grouped, currency_id, currency_en.
@@ -122,8 +129,39 @@ func buildImportMappingRequest(filename string, table *spreadsheet.Table, accoun
 		request.Truncated = true
 	}
 	request.Categories = sortedCategories
+	request.fitToBudget()
 
 	return request
+}
+
+func (r *importMappingRequest) fitToBudget() {
+	if r == nil || importMappingRequestSize(r) <= maxImportMappingPayloadBytes {
+		return
+	}
+	r.Truncated = true
+
+	// Drop middle samples first while keeping the first and last rows.
+	for len(r.Sample) > 2 && importMappingRequestSize(r) > maxImportMappingPayloadBytes {
+		middle := len(r.Sample) / 2
+		r.Sample = append(r.Sample[:middle], r.Sample[middle+1:]...)
+	}
+
+	// Then trim the vocabulary lists, largest first.
+	for importMappingRequestSize(r) > maxImportMappingPayloadBytes && (len(r.Accounts) > 0 || len(r.Categories) > 0) {
+		if len(r.Accounts) >= len(r.Categories) && len(r.Accounts) > 0 {
+			r.Accounts = r.Accounts[:(len(r.Accounts)+1)/2]
+		} else if len(r.Categories) > 0 {
+			r.Categories = r.Categories[:(len(r.Categories)+1)/2]
+		}
+	}
+}
+
+func importMappingRequestSize(request *importMappingRequest) int {
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return 0
+	}
+	return len(payload)
 }
 
 func importMappingMessages(request importMappingRequest) []llm.Message {
@@ -133,7 +171,7 @@ func importMappingMessages(request importMappingRequest) []llm.Message {
 	}
 	return []llm.Message{
 		{Role: "system", Content: importMappingSystemPrompt},
-		{Role: "user", Content: "Map this spreadsheet. Return only the JSON object.\n\n" + string(payload)},
+		{Role: "user", Content: importMappingUserPrefix + string(payload)},
 	}
 }
 
@@ -213,8 +251,9 @@ func columnLetter(column int) string {
 }
 
 func truncateString(value string, limit int) string {
-	if len(value) <= limit {
+	if utf8.RuneCountInString(value) <= limit {
 		return value
 	}
-	return value[:limit]
+	runes := []rune(value)
+	return string(runes[:limit])
 }

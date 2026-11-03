@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -180,7 +181,7 @@ func buildImportCandidate(record []string, columns map[string]int, accountIDs ma
 
 	amountValue := value("amount")
 	amount, err := strconv.ParseFloat(amountValue, 64)
-	if err != nil || amount <= 0 {
+	if err != nil || math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 {
 		return importCandidate{}, fmt.Errorf("invalid amount %q", amountValue)
 	}
 
