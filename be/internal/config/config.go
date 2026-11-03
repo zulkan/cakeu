@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
@@ -22,6 +23,9 @@ type Config struct {
 	LLMAPIKey         string
 	LLMTimeoutSeconds int
 	LLMMaxTokens      int
+
+	SmartImportMode       string
+	SmartImportSampleRows int
 }
 
 func Load() (*Config, error) {
@@ -53,6 +57,19 @@ func Load() (*Config, error) {
 		llmMaxTokens = 1024
 	}
 
+	smartImportMode := strings.ToLower(strings.TrimSpace(getEnv("SMART_IMPORT_MODE", "ai")))
+	if smartImportMode != "ai" && smartImportMode != "strict" {
+		smartImportMode = "ai"
+	}
+
+	smartImportSampleRows, err := strconv.Atoi(getEnv("SMART_IMPORT_SAMPLE_ROWS", "30"))
+	if err != nil || smartImportSampleRows < 5 {
+		smartImportSampleRows = 30
+	}
+	if smartImportSampleRows > 50 {
+		smartImportSampleRows = 50
+	}
+
 	cfg := &Config{
 		DatabaseURL:  databaseURL,
 		Port:         port,
@@ -69,6 +86,9 @@ func Load() (*Config, error) {
 		LLMAPIKey:         os.Getenv("LLM_API_KEY"),
 		LLMTimeoutSeconds: llmTimeout,
 		LLMMaxTokens:      llmMaxTokens,
+
+		SmartImportMode:       smartImportMode,
+		SmartImportSampleRows: smartImportSampleRows,
 	}
 
 	return cfg, nil

@@ -98,12 +98,26 @@ func main() {
 	)
 	chatService := service.NewChatService(accountService, categoryService, transactionService, budgetService, recurringService, reportService, llmClient, logger)
 
+	importService := service.NewImportService(
+		llmClient,
+		transactionService,
+		accountRepo,
+		categoryRepo,
+		service.ImportSettings{
+			Mode:       service.ImportMode(cfg.SmartImportMode),
+			SampleRows: cfg.SmartImportSampleRows,
+		},
+		logger,
+	)
+
 	handler := httpserver.NewHandler(
 		healthService,
 		authService,
 		accountService,
 		categoryService,
 		transactionService,
+		importService,
+		service.ImportMode(cfg.SmartImportMode),
 		budgetService,
 		recurringService,
 		reportService,

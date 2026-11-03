@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { api } from '../api';
 import { useAuthStore } from '../../stores/authStore';
 import { jsonResponse, mockFetchOnce, testUser } from '../../test/helpers';
+import type { ImportMapping } from '../../types';
 
 function storedToken(token: string) {
   localStorage.setItem(
@@ -112,67 +113,44 @@ describe('api client', () => {
 
   it('previews an import as multipart without a JSON content type', async () => {
     storedToken('abc123');
-    const result = {
-      total: 1,
-      valid: 1,
-      invalid: 0,
-      errors: [],
-      preview: [],
-    };
+    const result = { total: 1, valid: 1, invalid: 0, skipped: 0, errors: [], preview: [] };
     const fetchMock = mockFetchOnce(result);
-    const file = new File(['date,type,amount\n'], 'rows.csv', {
-      type: 'text/csv',
-    });
+    const file = new File(['date,type,amount\n'], 'rows.csv', { type: 'text/csv' });
 
     await expect(api.previewImport(file)).resolves.toEqual(result);
 
     const [url, options] = fetchMock.mock.calls[0];
     expect(url).toBe('/api/transactions/import/preview');
     const body = (options as RequestInit).body as FormData;
-    expect(body).toBeInstanceOf(FormData);
     expect(body.get('file')).toBe(file);
     expect(body.get('confirm')).toBeNull();
     expect(body.get('sheet')).toBeNull();
+    expect(body.get('mode')).toBeNull();
     const headers = (options as RequestInit).headers as Record<string, string>;
     expect(headers.Authorization).toBe('Bearer abc123');
     expect(headers['Content-Type']).toBeUndefined();
   });
 
-  it('appends the selected sheet when previewing a workbook', async () => {
+  it('appends the selected sheet and mode when previewing a workbook', async () => {
     storedToken('abc123');
-    const result = {
-      total: 1,
-      valid: 1,
-      invalid: 0,
-      sheet: 'February',
-      sheets: ['January', 'February'],
-      errors: [],
-      preview: [],
-    };
+    const result = { total: 1, valid: 1, invalid: 0, skipped: 0, sheet: 'February', sheets: ['January', 'February'], errors: [], preview: [] };
     const fetchMock = mockFetchOnce(result);
     const file = new File(['sheet-bytes'], 'rows.xlsx');
 
-    await expect(api.previewImport(file, 'February')).resolves.toEqual(result);
+    await expect(api.previewImport(file, { sheet: 'February', mode: 'strict' })).resolves.toEqual(result);
 
     const body = (fetchMock.mock.calls[0][1] as RequestInit).body as FormData;
     expect(body.get('file')).toBe(file);
     expect(body.get('sheet')).toBe('February');
+    expect(body.get('mode')).toBe('strict');
     expect(body.get('confirm')).toBeNull();
   });
 
   it('commits an import with confirm=true', async () => {
     storedToken('abc123');
-    const result = {
-      total: 2,
-      valid: 2,
-      invalid: 0,
-      errors: [],
-      preview: [],
-    };
+    const result = { total: 2, valid: 2, invalid: 0, skipped: 0, errors: [], preview: [] };
     const fetchMock = mockFetchOnce(result);
-    const file = new File(['date,type,amount\n'], 'rows.csv', {
-      type: 'text/csv',
-    });
+    const file = new File(['date,type,amount\n'], 'rows.csv', { type: 'text/csv' });
 
     await expect(api.importTransactions(file)).resolves.toEqual(result);
 
@@ -182,30 +160,37 @@ describe('api client', () => {
     expect(body.get('file')).toBe(file);
     expect(body.get('confirm')).toBe('true');
     expect(body.get('sheet')).toBeNull();
-    const headers = (options as RequestInit).headers as Record<string, string>;
-    expect(headers.Authorization).toBe('Bearer abc123');
-    expect(headers['Content-Type']).toBeUndefined();
+    expect(body.get('mode')).toBeNull();
+    expect(body.get('mapping')).toBeNull();
   });
 
-  it('appends the selected sheet when committing a workbook', async () => {
+  it('appends the sheet, mode and mapping when committing a workbook', async () => {
     storedToken('abc123');
-    const result = {
-      total: 1,
-      valid: 1,
-      invalid: 0,
-      sheet: 'March',
-      sheets: ['January', 'March'],
-      errors: [],
-      preview: [],
-    };
+    const result = { total: 1, valid: 1, invalid: 0, skipped: 0, sheet: 'March', sheets: ['January', 'March'], errors: [], preview: [] };
     const fetchMock = mockFetchOnce(result);
     const file = new File(['sheet-bytes'], 'rows.xlsx');
+    const mapping: ImportMapping = {
+      sheet: 'March',
+      header_row: 1,
+      data_start: 2,
+      data_end: 2,
+      fields: {
+        date: { column: 1 },
+        amount: { column: 3 },
+        description: { column: 4 },
+        account: { column: 5 },
+        category: { column: 6 },
+      },
+      type: { column: 2 },
+    };
 
-    await expect(api.importTransactions(file, 'March')).resolves.toEqual(result);
+    await expect(api.importTransactions(file, { sheet: 'March', mode: 'ai', mapping })).resolves.toEqual(result);
 
     const body = (fetchMock.mock.calls[0][1] as RequestInit).body as FormData;
     expect(body.get('file')).toBe(file);
     expect(body.get('confirm')).toBe('true');
     expect(body.get('sheet')).toBe('March');
+    expect(body.get('mode')).toBe('ai');
+    expect(JSON.parse(String(body.get('mapping')))).toEqual(mapping);
   });
 });

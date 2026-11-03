@@ -87,12 +87,53 @@ export interface ImportPreviewRow {
   category: string;
 }
 
+export type ImportMode = 'ai' | 'strict';
+
+export interface ImportFieldRule {
+  column?: number;
+  constant?: string;
+  carry_forward?: boolean;
+  date_format?: string;
+  amount_format?: string;
+  amount_mode?: string;
+  value_map?: Record<string, string>;
+}
+
+export interface ImportTypeRule {
+  column?: number;
+  constant?: 'income' | 'expense';
+  value_map?: Record<string, string>;
+}
+
+export interface ImportFields {
+  date: ImportFieldRule;
+  amount: ImportFieldRule;
+  description: ImportFieldRule;
+  account: ImportFieldRule;
+  category: ImportFieldRule;
+}
+
+export interface ImportMapping {
+  sheet: string;
+  header_row: number;
+  data_start: number;
+  data_end: number;
+  skip_rows?: number[];
+  fields: ImportFields;
+  type: ImportTypeRule;
+  confidence?: number;
+  notes?: string;
+}
+
 export interface ImportResult {
   total: number;
   valid: number;
   invalid: number;
+  skipped: number;
   sheet: string;
   sheets: string[];
+  mode?: ImportMode;
+  mapping?: ImportMapping;
   errors: ImportRowError[];
   preview: ImportPreviewRow[];
 }
