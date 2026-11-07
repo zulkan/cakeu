@@ -1,4 +1,4 @@
-import { Pencil, Trash2 } from 'lucide-react';
+import { Lock, Pencil, Trash2 } from 'lucide-react';
 import type { Category, Transaction } from '../../types';
 import { formatCurrency, formatDate } from '../../lib/format';
 import { TypeBadge } from '../ui/TypeBadge';
@@ -6,15 +6,19 @@ import { TypeBadge } from '../ui/TypeBadge';
 interface TransactionListProps {
   transactions: Transaction[];
   categories: Category[];
-  currency: string;
   onEdit: (transaction: Transaction) => void;
   onDelete: (transaction: Transaction) => void;
+}
+
+function systemLabel(transaction: Transaction): string {
+  return transaction.kind === 'opening'
+    ? 'Opening balance'
+    : 'Balance adjustment';
 }
 
 export function TransactionList({
   transactions,
   categories,
-  currency,
   onEdit,
   onDelete,
 }: TransactionListProps) {
@@ -54,6 +58,7 @@ export function TransactionList({
           <tbody className="divide-y divide-warm-100">
             {transactions.map((transaction) => {
               const isIncome = transaction.type === 'income';
+              const isSystem = transaction.kind !== 'normal';
 
               return (
                 <tr
@@ -69,24 +74,37 @@ export function TransactionList({
                     </p>
                   </td>
                   <td className="whitespace-nowrap px-4 py-3">
-                    <span className="inline-flex items-center gap-2 text-stone-600">
-                      <span
-                        className="h-2.5 w-2.5 rounded-full"
-                        style={{
-                          backgroundColor:
-                            colorById.get(transaction.category_id) ??
-                            '#FB923C',
-                        }}
-                        aria-hidden="true"
-                      />
-                      {transaction.category_name}
-                    </span>
+                    {isSystem ? (
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-warm-100 px-2.5 py-1 text-xs font-semibold text-warm-800">
+                        <Lock className="h-3 w-3" aria-hidden="true" />
+                        {systemLabel(transaction)}
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-2 text-stone-600">
+                        <span
+                          className="h-2.5 w-2.5 rounded-full"
+                          style={{
+                            backgroundColor:
+                              colorById.get(transaction.category_id) ??
+                              '#FB923C',
+                          }}
+                          aria-hidden="true"
+                        />
+                        {transaction.category_name}
+                      </span>
+                    )}
                   </td>
                   <td className="whitespace-nowrap px-4 py-3 text-stone-600">
                     {transaction.account_name}
                   </td>
                   <td className="whitespace-nowrap px-4 py-3">
-                    <TypeBadge type={transaction.type} />
+                    {isSystem ? (
+                      <span className="rounded-full bg-warm-100 px-2.5 py-1 text-xs font-semibold text-warm-800">
+                        System
+                      </span>
+                    ) : (
+                      <TypeBadge type={transaction.type} />
+                    )}
                   </td>
                   <td
                     className={`whitespace-nowrap px-4 py-3 text-right font-bold ${
@@ -94,27 +112,41 @@ export function TransactionList({
                     }`}
                   >
                     {isIncome ? '+' : '−'}
-                    {formatCurrency(Math.abs(transaction.amount), currency)}
+                    {formatCurrency(
+                      Math.abs(transaction.amount),
+                      transaction.currency
+                    )}
                   </td>
                   <td className="px-4 py-3">
-                    <div className="flex items-center justify-end gap-1">
-                      <button
-                        type="button"
-                        onClick={() => onEdit(transaction)}
-                        aria-label={`Edit transaction ${transaction.description || transaction.category_name}`}
-                        className="rounded-lg p-2 text-stone-400 transition-colors hover:bg-brand-50 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
-                      >
-                        <Pencil className="h-4 w-4" aria-hidden="true" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onDelete(transaction)}
-                        aria-label={`Delete transaction ${transaction.description || transaction.category_name}`}
-                        className="rounded-lg p-2 text-stone-400 transition-colors hover:bg-expense-light hover:text-expense focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
-                      >
-                        <Trash2 className="h-4 w-4" aria-hidden="true" />
-                      </button>
-                    </div>
+                    {isSystem ? (
+                      <div className="flex items-center justify-end">
+                        <span
+                          className="rounded-lg p-2 text-stone-300"
+                          title="System entries cannot be edited or deleted"
+                        >
+                          <Lock className="h-4 w-4" aria-hidden="true" />
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-end gap-1">
+                        <button
+                          type="button"
+                          onClick={() => onEdit(transaction)}
+                          aria-label={`Edit transaction ${transaction.description || transaction.category_name}`}
+                          className="rounded-lg p-2 text-stone-400 transition-colors hover:bg-brand-50 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+                        >
+                          <Pencil className="h-4 w-4" aria-hidden="true" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onDelete(transaction)}
+                          aria-label={`Delete transaction ${transaction.description || transaction.category_name}`}
+                          className="rounded-lg p-2 text-stone-400 transition-colors hover:bg-expense-light hover:text-expense focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+                        >
+                          <Trash2 className="h-4 w-4" aria-hidden="true" />
+                        </button>
+                      </div>
+                    )}
                   </td>
                 </tr>
               );
@@ -126,16 +158,20 @@ export function TransactionList({
       <ul className="divide-y divide-warm-100 md:hidden">
         {transactions.map((transaction) => {
           const isIncome = transaction.type === 'income';
+          const isSystem = transaction.kind !== 'normal';
 
           return (
             <li key={transaction.id} className="px-4 py-4">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <p className="truncate font-semibold text-stone-900">
-                    {transaction.description || transaction.category_name}
+                    {transaction.description || systemLabel(transaction)}
                   </p>
                   <p className="mt-0.5 truncate text-xs text-stone-500">
-                    {transaction.category_name} · {transaction.account_name}
+                    {isSystem
+                      ? systemLabel(transaction)
+                      : transaction.category_name}{' '}
+                    · {transaction.account_name}
                   </p>
                   <p className="mt-0.5 text-xs text-stone-400">
                     {formatDate(transaction.date)}
@@ -148,26 +184,38 @@ export function TransactionList({
                     }`}
                   >
                     {isIncome ? '+' : '−'}
-                    {formatCurrency(Math.abs(transaction.amount), currency)}
+                    {formatCurrency(
+                      Math.abs(transaction.amount),
+                      transaction.currency
+                    )}
                   </span>
-                  <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => onEdit(transaction)}
-                      aria-label={`Edit transaction ${transaction.description || transaction.category_name}`}
-                      className="rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-brand-50 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+                  {isSystem ? (
+                    <span
+                      className="rounded-lg p-1.5 text-stone-300"
+                      title="System entries cannot be edited or deleted"
                     >
-                      <Pencil className="h-4 w-4" aria-hidden="true" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onDelete(transaction)}
-                      aria-label={`Delete transaction ${transaction.description || transaction.category_name}`}
-                      className="rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-expense-light hover:text-expense focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
-                    >
-                      <Trash2 className="h-4 w-4" aria-hidden="true" />
-                    </button>
-                  </div>
+                      <Lock className="h-4 w-4" aria-hidden="true" />
+                    </span>
+                  ) : (
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => onEdit(transaction)}
+                        aria-label={`Edit transaction ${transaction.description || transaction.category_name}`}
+                        className="rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-brand-50 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+                      >
+                        <Pencil className="h-4 w-4" aria-hidden="true" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onDelete(transaction)}
+                        aria-label={`Delete transaction ${transaction.description || transaction.category_name}`}
+                        className="rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-expense-light hover:text-expense focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+                      >
+                        <Trash2 className="h-4 w-4" aria-hidden="true" />
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             </li>

@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -20,31 +21,39 @@ type fakeAccountRepo struct {
 	listErr    error
 	createErr  error
 	updateErr  error
+	adjustErr  error
 	deleteErr  error
 	deleted    []uuid.UUID
 	lastCreate struct {
-		userID   uuid.UUID
-		name     string
-		balance  float64
-		currency string
+		userID         uuid.UUID
+		name           string
+		openingBalance float64
+		currency       string
 	}
 	lastUpdate struct {
 		id       uuid.UUID
 		name     *string
-		balance  *float64
 		currency *string
 	}
+	lastAdjust model.AdjustAccountRequest
 }
 
-func (f *fakeAccountRepo) Create(ctx context.Context, userID uuid.UUID, name string, balance float64, currency string) (*model.Account, error) {
+func (f *fakeAccountRepo) Create(ctx context.Context, userID uuid.UUID, name string, openingBalance float64, currency string) (*model.Account, error) {
 	f.lastCreate.userID = userID
 	f.lastCreate.name = name
-	f.lastCreate.balance = balance
+	f.lastCreate.openingBalance = openingBalance
 	f.lastCreate.currency = currency
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
-	return &model.Account{ID: uuid.New(), UserID: userID, Name: name, Balance: balance, Currency: currency}, nil
+	return &model.Account{
+		ID:             uuid.New(),
+		UserID:         userID,
+		Name:           name,
+		Balance:        openingBalance,
+		OpeningBalance: openingBalance,
+		Currency:       currency,
+	}, nil
 }
 
 func (f *fakeAccountRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.Account, error) {
@@ -64,15 +73,22 @@ func (f *fakeAccountRepo) ListByUser(ctx context.Context, userID uuid.UUID) ([]m
 	return f.accounts, nil
 }
 
-func (f *fakeAccountRepo) Update(ctx context.Context, userID uuid.UUID, id uuid.UUID, name *string, balance *float64, currency *string) (*model.Account, error) {
+func (f *fakeAccountRepo) Update(ctx context.Context, userID uuid.UUID, id uuid.UUID, name *string, currency *string) (*model.Account, error) {
 	f.lastUpdate.id = id
 	f.lastUpdate.name = name
-	f.lastUpdate.balance = balance
 	f.lastUpdate.currency = currency
 	if f.updateErr != nil {
 		return nil, f.updateErr
 	}
 	return &model.Account{ID: id, Name: "updated"}, nil
+}
+
+func (f *fakeAccountRepo) AdjustBalance(ctx context.Context, userID uuid.UUID, id uuid.UUID, targetBalance float64, description string) (*model.Account, error) {
+	f.lastAdjust = model.AdjustAccountRequest{TargetBalance: targetBalance, Description: description}
+	if f.adjustErr != nil {
+		return nil, f.adjustErr
+	}
+	return &model.Account{ID: id, UserID: userID, Balance: targetBalance}, nil
 }
 
 func (f *fakeAccountRepo) Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
@@ -135,8 +151,7 @@ type fakeTransactionRepo struct {
 	updated     *model.Transaction
 	list        []model.Transaction
 	total       int
-	income      float64
-	expense     float64
+	monthly     []model.MonthlyCurrencyTotal
 	createErr   error
 	getErr      error
 	listErr     error
@@ -217,11 +232,11 @@ func (f *fakeTransactionRepo) Delete(ctx context.Context, userID uuid.UUID, id u
 	return f.deleteErr
 }
 
-func (f *fakeTransactionRepo) MonthlyTotals(ctx context.Context, userID uuid.UUID, month time.Time) (float64, float64, error) {
+func (f *fakeTransactionRepo) MonthlyTotalsByCurrency(ctx context.Context, userID uuid.UUID, month time.Time) ([]model.MonthlyCurrencyTotal, error) {
 	if f.monthlyErr != nil {
-		return 0, 0, f.monthlyErr
+		return nil, f.monthlyErr
 	}
-	return f.income, f.expense, nil
+	return f.monthly, nil
 }
 
 func TestAccountServiceCreateAccountDefaultsCurrency(t *testing.T) {
@@ -232,8 +247,8 @@ func TestAccountServiceCreateAccountDefaultsCurrency(t *testing.T) {
 	userID := uuid.New()
 
 	account, err := accounts.CreateAccount(context.Background(), userID, model.CreateAccountRequest{
-		Name:    "  Checking  ",
-		Balance: 100,
+		Name:           "  Checking  ",
+		OpeningBalance: 100,
 	})
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -247,6 +262,45 @@ func TestAccountServiceCreateAccountDefaultsCurrency(t *testing.T) {
 	}
 	if account.UserID != userID {
 		t.Fatalf("expected user id %s, got %s", userID, account.UserID)
+	}
+}
+
+func TestAccountServiceCreateAccountUsesOpeningBalance(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeAccountRepo{}
+	accounts := service.NewAccountService(repo)
+
+	account, err := accounts.CreateAccount(context.Background(), uuid.New(), model.CreateAccountRequest{
+		Name:           "Checking",
+		OpeningBalance: -50,
+		Currency:       "usd",
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if repo.lastCreate.openingBalance != -50 {
+		t.Fatalf("expected opening balance -50, got %v", repo.lastCreate.openingBalance)
+	}
+	if repo.lastCreate.currency != "USD" {
+		t.Fatalf("expected normalized currency USD, got %q", repo.lastCreate.currency)
+	}
+	if account.Balance != -50 {
+		t.Fatalf("expected derived balance -50, got %v", account.Balance)
+	}
+}
+
+func TestAccountServiceCreateAccountRejectsInvalidOpeningBalance(t *testing.T) {
+	t.Parallel()
+
+	accounts := service.NewAccountService(&fakeAccountRepo{})
+
+	_, err := accounts.CreateAccount(context.Background(), uuid.New(), model.CreateAccountRequest{
+		Name:           "Checking",
+		OpeningBalance: math.NaN(),
+	})
+	if !errors.Is(err, service.ErrInvalidBalance) {
+		t.Fatalf("expected ErrInvalidBalance, got %v", err)
 	}
 }
 
@@ -291,9 +345,6 @@ func TestAccountServiceUpdateAccountPartial(t *testing.T) {
 	if repo.lastUpdate.name == nil || *repo.lastUpdate.name != "Savings" {
 		t.Fatalf("expected trimmed name %q, got %v", "Savings", repo.lastUpdate.name)
 	}
-	if repo.lastUpdate.balance != nil {
-		t.Fatalf("expected balance to remain nil, got %v", *repo.lastUpdate.balance)
-	}
 	if repo.lastUpdate.currency != nil {
 		t.Fatalf("expected currency to remain nil, got %v", *repo.lastUpdate.currency)
 	}
@@ -320,6 +371,55 @@ func TestAccountServiceUpdateAccountRejectsInvalidCurrency(t *testing.T) {
 	_, err := accounts.UpdateAccount(context.Background(), uuid.New(), uuid.New(), model.UpdateAccountRequest{Currency: &currency})
 	if !errors.Is(err, service.ErrInvalidCurrency) {
 		t.Fatalf("expected ErrInvalidCurrency, got %v", err)
+	}
+}
+
+func TestAccountServiceUpdateAccountRejectsBalanceEdit(t *testing.T) {
+	t.Parallel()
+
+	accounts := service.NewAccountService(&fakeAccountRepo{})
+	balance := 100.0
+
+	_, err := accounts.UpdateAccount(context.Background(), uuid.New(), uuid.New(), model.UpdateAccountRequest{Balance: &balance})
+	if !errors.Is(err, service.ErrUseAdjustmentEndpoint) {
+		t.Fatalf("expected ErrUseAdjustmentEndpoint, got %v", err)
+	}
+}
+
+func TestAccountServiceAdjustAccountBalanceRecordsCorrection(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeAccountRepo{}
+	accounts := service.NewAccountService(repo)
+	id := uuid.New()
+
+	account, err := accounts.AdjustAccountBalance(context.Background(), uuid.New(), id, model.AdjustAccountRequest{
+		TargetBalance: 950,
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if repo.lastAdjust.TargetBalance != 950 {
+		t.Fatalf("expected target 950, got %v", repo.lastAdjust.TargetBalance)
+	}
+	if repo.lastAdjust.Description != "Balance adjustment" {
+		t.Fatalf("expected default description, got %q", repo.lastAdjust.Description)
+	}
+	if account.Balance != 950 {
+		t.Fatalf("expected updated balance 950, got %v", account.Balance)
+	}
+}
+
+func TestAccountServiceAdjustAccountBalanceRejectsInvalidTarget(t *testing.T) {
+	t.Parallel()
+
+	accounts := service.NewAccountService(&fakeAccountRepo{})
+
+	_, err := accounts.AdjustAccountBalance(context.Background(), uuid.New(), uuid.New(), model.AdjustAccountRequest{
+		TargetBalance: math.Inf(1),
+	})
+	if !errors.Is(err, service.ErrInvalidBalance) {
+		t.Fatalf("expected ErrInvalidBalance, got %v", err)
 	}
 }
 
@@ -747,6 +847,43 @@ func TestTransactionServiceUpdateTransactionRejectsForeignAccount(t *testing.T) 
 	}
 }
 
+func TestTransactionServiceUpdateTransactionRejectsSystemEntry(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	transactionID := uuid.New()
+	existing := &model.Transaction{
+		ID:     transactionID,
+		UserID: userID,
+		Kind:   service.EntryKindOpening,
+	}
+	transactions := service.NewTransactionService(
+		&fakeTransactionRepo{transaction: existing},
+		&fakeAccountRepo{},
+		&fakeCategoryRepo{},
+	)
+
+	_, err := transactions.UpdateTransaction(context.Background(), userID, transactionID, model.UpdateTransactionRequest{})
+	if !errors.Is(err, service.ErrSystemEntryImmutable) {
+		t.Fatalf("expected ErrSystemEntryImmutable, got %v", err)
+	}
+}
+
+func TestTransactionServiceDeleteTransactionRejectsSystemEntry(t *testing.T) {
+	t.Parallel()
+
+	transactions := service.NewTransactionService(
+		&fakeTransactionRepo{deleteErr: service.ErrSystemEntryImmutable},
+		&fakeAccountRepo{},
+		&fakeCategoryRepo{},
+	)
+
+	err := transactions.DeleteTransaction(context.Background(), uuid.New(), uuid.New())
+	if !errors.Is(err, service.ErrSystemEntryImmutable) {
+		t.Fatalf("expected ErrSystemEntryImmutable, got %v", err)
+	}
+}
+
 func TestTransactionServiceExportTransactions(t *testing.T) {
 	t.Parallel()
 
@@ -920,15 +1057,17 @@ func TestTransactionServiceGetDashboardSummary(t *testing.T) {
 
 	userID := uuid.New()
 	accountRepo := &fakeAccountRepo{accounts: []model.Account{
-		{ID: uuid.New(), UserID: userID, Balance: 100.50},
-		{ID: uuid.New(), UserID: userID, Balance: 200},
+		{ID: uuid.New(), UserID: userID, Balance: 100.50, Currency: "USD"},
+		{ID: uuid.New(), UserID: userID, Balance: 200, Currency: "USD"},
+		{ID: uuid.New(), UserID: userID, Balance: 5000, Currency: "IDR"},
 	}}
 	recent := []model.Transaction{{ID: uuid.New()}, {ID: uuid.New()}}
 	transactionRepo := &fakeTransactionRepo{
-		list:    recent,
-		total:   42,
-		income:  1000,
-		expense: 250,
+		list:  recent,
+		total: 42,
+		monthly: []model.MonthlyCurrencyTotal{
+			{Currency: "USD", Income: 1000, Expense: 250},
+		},
 	}
 	transactions := service.NewTransactionService(transactionRepo, accountRepo, &fakeCategoryRepo{})
 
@@ -937,17 +1076,17 @@ func TestTransactionServiceGetDashboardSummary(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	if summary.TotalBalance != 300.50 {
-		t.Fatalf("expected total balance 300.50, got %v", summary.TotalBalance)
+	if len(summary.Balances) != 2 {
+		t.Fatalf("expected 2 currency balances, got %+v", summary.Balances)
 	}
-	if summary.MonthlyIncome != 1000 {
-		t.Fatalf("expected monthly income 1000, got %v", summary.MonthlyIncome)
+	if summary.Balances[0].Currency != "IDR" || summary.Balances[0].Total != 5000 {
+		t.Fatalf("unexpected IDR balance: %+v", summary.Balances[0])
 	}
-	if summary.MonthlyExpense != 250 {
-		t.Fatalf("expected monthly expense 250, got %v", summary.MonthlyExpense)
+	if summary.Balances[1].Currency != "USD" || summary.Balances[1].Total != 300.50 {
+		t.Fatalf("unexpected USD balance: %+v", summary.Balances[1])
 	}
-	if summary.MonthlyNet != 750 {
-		t.Fatalf("expected monthly net 750, got %v", summary.MonthlyNet)
+	if len(summary.Monthly) != 1 || summary.Monthly[0].Net != 750 {
+		t.Fatalf("unexpected monthly totals: %+v", summary.Monthly)
 	}
 	if summary.TransactionCount != 42 {
 		t.Fatalf("expected transaction count 42, got %d", summary.TransactionCount)

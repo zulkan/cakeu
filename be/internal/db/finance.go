@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -31,17 +32,20 @@ func NewAccountRepo(pool *pgxpool.Pool) *AccountRepo {
 	return &AccountRepo{pool: pool}
 }
 
-func (r *AccountRepo) Create(ctx context.Context, userID uuid.UUID, name string, balance float64, currency string) (*model.Account, error) {
-	query := `
-		INSERT INTO accounts (user_id, name, balance, currency)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, user_id, name, balance, currency, created_at, updated_at
-	`
+func (r *AccountRepo) Create(ctx context.Context, userID uuid.UUID, name string, openingBalance float64, currency string) (*model.Account, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin account: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
 
-	var account model.Account
-	err := r.pool.QueryRow(ctx, query, userID, name, balance, currency).Scan(
-		&account.ID, &account.UserID, &account.Name, &account.Balance, &account.Currency, &account.CreatedAt, &account.UpdatedAt,
-	)
+	var accountID uuid.UUID
+	err = tx.QueryRow(ctx,
+		`INSERT INTO accounts (user_id, name, currency) VALUES ($1, $2, $3) RETURNING id`,
+		userID, name, currency,
+	).Scan(&accountID)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return nil, service.ErrAccountNameExists
@@ -49,15 +53,51 @@ func (r *AccountRepo) Create(ctx context.Context, userID uuid.UUID, name string,
 		return nil, fmt.Errorf("insert account: %w", err)
 	}
 
-	return &account, nil
+	if openingBalance != 0 {
+		entryType := service.TypeIncome
+		amount := openingBalance
+		if openingBalance < 0 {
+			entryType = service.TypeExpense
+			amount = -openingBalance
+		}
+
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO transactions (user_id, account_id, category_id, type, amount, description, date, kind)
+			 VALUES ($1, $2, NULL, $3, $4, $5, CURRENT_DATE, $6)`,
+			userID, accountID, entryType, amount, "Opening balance", service.EntryKindOpening,
+		); err != nil {
+			return nil, fmt.Errorf("insert opening balance: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit account: %w", err)
+	}
+
+	return r.GetByID(ctx, accountID)
 }
 
 func (r *AccountRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.Account, error) {
-	query := `SELECT id, user_id, name, balance, currency, created_at, updated_at FROM accounts WHERE id = $1`
+	query := `
+		SELECT a.id, a.user_id, a.name, a.currency, a.created_at, a.updated_at,
+		       COALESCE(SUM(CASE WHEN t.type = 'income' THEN t.amount ELSE -t.amount END), 0) AS balance,
+		       COALESCE(SUM(
+		           CASE WHEN t.kind = 'opening'
+		                THEN CASE WHEN t.type = 'income' THEN t.amount ELSE -t.amount END
+		           END
+		       ), 0) AS opening_balance,
+		       COUNT(t.id) AS entry_count
+		FROM accounts a
+		LEFT JOIN transactions t ON t.account_id = a.id
+		WHERE a.id = $1
+		GROUP BY a.id
+	`
 
 	var account model.Account
 	err := r.pool.QueryRow(ctx, query, id).Scan(
-		&account.ID, &account.UserID, &account.Name, &account.Balance, &account.Currency, &account.CreatedAt, &account.UpdatedAt,
+		&account.ID, &account.UserID, &account.Name, &account.Currency,
+		&account.CreatedAt, &account.UpdatedAt,
+		&account.Balance, &account.OpeningBalance, &account.EntryCount,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -71,10 +111,19 @@ func (r *AccountRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.Account
 
 func (r *AccountRepo) ListByUser(ctx context.Context, userID uuid.UUID) ([]model.Account, error) {
 	query := `
-		SELECT id, user_id, name, balance, currency, created_at, updated_at
-		FROM accounts
-		WHERE user_id = $1
-		ORDER BY created_at ASC, name ASC
+		SELECT a.id, a.user_id, a.name, a.currency, a.created_at, a.updated_at,
+		       COALESCE(SUM(CASE WHEN t.type = 'income' THEN t.amount ELSE -t.amount END), 0) AS balance,
+		       COALESCE(SUM(
+		           CASE WHEN t.kind = 'opening'
+		                THEN CASE WHEN t.type = 'income' THEN t.amount ELSE -t.amount END
+		           END
+		       ), 0) AS opening_balance,
+		       COUNT(t.id) AS entry_count
+		FROM accounts a
+		LEFT JOIN transactions t ON t.account_id = a.id
+		WHERE a.user_id = $1
+		GROUP BY a.id
+		ORDER BY a.created_at ASC, a.name ASC
 	`
 
 	rows, err := r.pool.Query(ctx, query, userID)
@@ -87,7 +136,9 @@ func (r *AccountRepo) ListByUser(ctx context.Context, userID uuid.UUID) ([]model
 	for rows.Next() {
 		var account model.Account
 		if err := rows.Scan(
-			&account.ID, &account.UserID, &account.Name, &account.Balance, &account.Currency, &account.CreatedAt, &account.UpdatedAt,
+			&account.ID, &account.UserID, &account.Name, &account.Currency,
+			&account.CreatedAt, &account.UpdatedAt,
+			&account.Balance, &account.OpeningBalance, &account.EntryCount,
 		); err != nil {
 			return nil, fmt.Errorf("scan account: %w", err)
 		}
@@ -100,32 +151,93 @@ func (r *AccountRepo) ListByUser(ctx context.Context, userID uuid.UUID) ([]model
 	return accounts, nil
 }
 
-func (r *AccountRepo) Update(ctx context.Context, userID uuid.UUID, id uuid.UUID, name *string, balance *float64, currency *string) (*model.Account, error) {
-	query := `
-		UPDATE accounts
-		SET name = COALESCE($3::varchar, name),
-		    balance = COALESCE($4::numeric, balance),
-		    currency = COALESCE($5::varchar, currency),
+func (r *AccountRepo) Update(ctx context.Context, userID uuid.UUID, id uuid.UUID, name *string, currency *string) (*model.Account, error) {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE accounts a
+		SET name = COALESCE($3::varchar, a.name),
+		    currency = COALESCE($4::varchar, a.currency),
 		    updated_at = NOW()
-		WHERE id = $1 AND user_id = $2
-		RETURNING id, user_id, name, balance, currency, created_at, updated_at
-	`
-
-	var account model.Account
-	err := r.pool.QueryRow(ctx, query, id, userID, name, balance, currency).Scan(
-		&account.ID, &account.UserID, &account.Name, &account.Balance, &account.Currency, &account.CreatedAt, &account.UpdatedAt,
-	)
+		WHERE a.id = $1 AND a.user_id = $2
+		  AND ($4::varchar IS NULL OR NOT EXISTS (
+		      SELECT 1 FROM transactions t WHERE t.account_id = a.id
+		  ))
+	`, id, userID, name, currency)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, service.ErrAccountNotFound
-		}
 		if isUniqueViolation(err) {
 			return nil, service.ErrAccountNameExists
 		}
 		return nil, fmt.Errorf("update account: %w", err)
 	}
+	if tag.RowsAffected() == 0 {
+		var exists bool
+		if err := r.pool.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM accounts WHERE id = $1 AND user_id = $2)`,
+			id, userID,
+		).Scan(&exists); err != nil {
+			return nil, fmt.Errorf("check account: %w", err)
+		}
+		if !exists {
+			return nil, service.ErrAccountNotFound
+		}
+		return nil, service.ErrCurrencyLocked
+	}
 
-	return &account, nil
+	return r.GetByID(ctx, id)
+}
+
+func (r *AccountRepo) AdjustBalance(ctx context.Context, userID uuid.UUID, id uuid.UUID, targetBalance float64, description string) (*model.Account, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin adjustment: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	var accountID uuid.UUID
+	err = tx.QueryRow(ctx,
+		`SELECT id FROM accounts WHERE id = $1 AND user_id = $2 FOR UPDATE`,
+		id, userID,
+	).Scan(&accountID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, service.ErrAccountNotFound
+		}
+		return nil, fmt.Errorf("lock account: %w", err)
+	}
+
+	var current float64
+	if err := tx.QueryRow(ctx,
+		`SELECT COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE -amount END), 0)
+		 FROM transactions WHERE account_id = $1`,
+		id,
+	).Scan(&current); err != nil {
+		return nil, fmt.Errorf("current balance: %w", err)
+	}
+
+	delta := math.Round((targetBalance-current)*100) / 100
+	if delta != 0 {
+		entryType := service.TypeIncome
+		amount := delta
+		if delta < 0 {
+			entryType = service.TypeExpense
+			amount = -delta
+		}
+
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO transactions (user_id, account_id, category_id, type, amount, description, date, kind)
+			 VALUES ($1, $2, NULL, $3, $4, $5, CURRENT_DATE, $6)`,
+			userID, id, entryType, amount, description, service.EntryKindAdjustment,
+		); err != nil {
+			return nil, fmt.Errorf("insert adjustment: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit adjustment: %w", err)
+	}
+
+	return r.GetByID(ctx, id)
 }
 
 func (r *AccountRepo) Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
@@ -246,10 +358,19 @@ func (r *TransactionRepo) Create(ctx context.Context, transaction model.Transact
 		_ = tx.Rollback(ctx)
 	}()
 
+	if err := lockAccounts(ctx, tx, transaction.UserID, []uuid.UUID{transaction.AccountID}); err != nil {
+		return nil, err
+	}
+
+	kind := transaction.Kind
+	if kind == "" {
+		kind = service.EntryKindNormal
+	}
+
 	query := `
-		INSERT INTO transactions (user_id, account_id, category_id, type, amount, description, date)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		RETURNING id, user_id, account_id, category_id, type, amount, description, date, created_at
+		INSERT INTO transactions (user_id, account_id, category_id, type, amount, description, date, kind)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		RETURNING id, user_id, account_id, category_id, type, amount, description, date, created_at, kind
 	`
 
 	var created model.Transaction
@@ -261,6 +382,7 @@ func (r *TransactionRepo) Create(ctx context.Context, transaction model.Transact
 		transaction.Amount,
 		transaction.Description,
 		transaction.Date,
+		kind,
 	).Scan(
 		&created.ID,
 		&created.UserID,
@@ -271,29 +393,20 @@ func (r *TransactionRepo) Create(ctx context.Context, transaction model.Transact
 		&created.Description,
 		&created.Date,
 		&created.CreatedAt,
+		&created.Kind,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert transaction: %w", err)
 	}
 
-	if err := tx.QueryRow(ctx, `SELECT name FROM accounts WHERE id = $1`, transaction.AccountID).Scan(&created.AccountName); err != nil {
-		return nil, fmt.Errorf("select account name: %w", err)
-	}
-
-	if err := tx.QueryRow(ctx, `SELECT name FROM categories WHERE id = $1`, transaction.CategoryID).Scan(&created.CategoryName); err != nil {
-		return nil, fmt.Errorf("select category name: %w", err)
-	}
-
-	delta := transaction.Amount
-	if transaction.Type == service.TypeExpense {
-		delta = -delta
-	}
-
-	if _, err := tx.Exec(ctx,
-		`UPDATE accounts SET balance = balance + $2, updated_at = NOW() WHERE id = $1`,
-		transaction.AccountID, delta,
-	); err != nil {
-		return nil, fmt.Errorf("update account balance: %w", err)
+	if err := tx.QueryRow(ctx,
+		`SELECT a.name, a.currency, COALESCE(c.name, '')
+		 FROM accounts a
+		 LEFT JOIN categories c ON c.id = $2
+		 WHERE a.id = $1`,
+		transaction.AccountID, transaction.CategoryID,
+	).Scan(&created.AccountName, &created.Currency, &created.CategoryName); err != nil {
+		return nil, fmt.Errorf("select transaction labels: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -305,11 +418,13 @@ func (r *TransactionRepo) Create(ctx context.Context, transaction model.Transact
 
 func (r *TransactionRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.Transaction, error) {
 	query := `
-		SELECT t.id, t.user_id, t.account_id, t.category_id, t.type, t.amount, t.description, t.date, t.created_at,
-			a.name, c.name
+		SELECT t.id, t.user_id, t.account_id,
+		       COALESCE(t.category_id, '00000000-0000-0000-0000-000000000000'::uuid),
+		       t.type, t.amount, t.description, t.date, t.created_at, t.kind,
+		       a.name, a.currency, COALESCE(c.name, '')
 		FROM transactions t
 		JOIN accounts a ON a.id = t.account_id
-		JOIN categories c ON c.id = t.category_id
+		LEFT JOIN categories c ON c.id = t.category_id
 		WHERE t.id = $1
 	`
 
@@ -324,7 +439,9 @@ func (r *TransactionRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.Tra
 		&transaction.Description,
 		&transaction.Date,
 		&transaction.CreatedAt,
+		&transaction.Kind,
 		&transaction.AccountName,
+		&transaction.Currency,
 		&transaction.CategoryName,
 	)
 	if err != nil {
@@ -335,27 +452,6 @@ func (r *TransactionRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.Tra
 	}
 
 	return &transaction, nil
-}
-
-func balanceDeltas(oldAccountID uuid.UUID, oldType string, oldAmount float64, newAccountID uuid.UUID, newType string, newAmount float64) map[uuid.UUID]float64 {
-	signedAmount := func(transactionType string, amount float64) float64 {
-		if transactionType == service.TypeExpense {
-			return -amount
-		}
-		return amount
-	}
-
-	oldDelta := signedAmount(oldType, oldAmount)
-	newDelta := signedAmount(newType, newAmount)
-
-	if oldAccountID == newAccountID {
-		return map[uuid.UUID]float64{oldAccountID: newDelta - oldDelta}
-	}
-
-	return map[uuid.UUID]float64{
-		oldAccountID: -oldDelta,
-		newAccountID: newDelta,
-	}
 }
 
 func (r *TransactionRepo) Update(ctx context.Context, userID uuid.UUID, transaction model.Transaction) (*model.Transaction, error) {
@@ -369,18 +465,24 @@ func (r *TransactionRepo) Update(ctx context.Context, userID uuid.UUID, transact
 
 	var (
 		oldAccountID uuid.UUID
-		oldType      string
-		oldAmount    float64
+		oldKind      string
 	)
 	err = tx.QueryRow(ctx,
-		`SELECT account_id, type, amount FROM transactions WHERE id = $1 AND user_id = $2 FOR UPDATE`,
+		`SELECT account_id, kind FROM transactions WHERE id = $1 AND user_id = $2 FOR UPDATE`,
 		transaction.ID, userID,
-	).Scan(&oldAccountID, &oldType, &oldAmount)
+	).Scan(&oldAccountID, &oldKind)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, service.ErrTransactionNotFound
 		}
 		return nil, fmt.Errorf("select transaction: %w", err)
+	}
+	if oldKind != "" && oldKind != service.EntryKindNormal {
+		return nil, service.ErrSystemEntryImmutable
+	}
+
+	if err := lockAccounts(ctx, tx, userID, []uuid.UUID{oldAccountID, transaction.AccountID}); err != nil {
+		return nil, err
 	}
 
 	query := `
@@ -391,8 +493,8 @@ func (r *TransactionRepo) Update(ctx context.Context, userID uuid.UUID, transact
 		    amount = $6,
 		    description = $7,
 		    date = $8
-		WHERE id = $1 AND user_id = $2
-		RETURNING id, user_id, account_id, category_id, type, amount, description, date, created_at
+		WHERE id = $1 AND user_id = $2 AND kind = 'normal'
+		RETURNING id, user_id, account_id, category_id, type, amount, description, date, created_at, kind
 	`
 
 	var updated model.Transaction
@@ -415,40 +517,20 @@ func (r *TransactionRepo) Update(ctx context.Context, userID uuid.UUID, transact
 		&updated.Description,
 		&updated.Date,
 		&updated.CreatedAt,
+		&updated.Kind,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update transaction: %w", err)
 	}
 
-	if err := tx.QueryRow(ctx, `SELECT name FROM accounts WHERE id = $1`, updated.AccountID).Scan(&updated.AccountName); err != nil {
-		return nil, fmt.Errorf("select account name: %w", err)
-	}
-
-	if err := tx.QueryRow(ctx, `SELECT name FROM categories WHERE id = $1`, updated.CategoryID).Scan(&updated.CategoryName); err != nil {
-		return nil, fmt.Errorf("select category name: %w", err)
-	}
-
-	deltas := balanceDeltas(oldAccountID, oldType, oldAmount, updated.AccountID, updated.Type, updated.Amount)
-
-	accountIDs := make([]uuid.UUID, 0, len(deltas))
-	for accountID := range deltas {
-		accountIDs = append(accountIDs, accountID)
-	}
-	sort.Slice(accountIDs, func(i int, j int) bool {
-		return accountIDs[i].String() < accountIDs[j].String()
-	})
-
-	for _, accountID := range accountIDs {
-		delta := deltas[accountID]
-		if delta == 0 {
-			continue
-		}
-		if _, err := tx.Exec(ctx,
-			`UPDATE accounts SET balance = balance + $2, updated_at = NOW() WHERE id = $1`,
-			accountID, delta,
-		); err != nil {
-			return nil, fmt.Errorf("update account balance: %w", err)
-		}
+	if err := tx.QueryRow(ctx,
+		`SELECT a.name, a.currency, COALESCE(c.name, '')
+		 FROM accounts a
+		 LEFT JOIN categories c ON c.id = $2
+		 WHERE a.id = $1`,
+		updated.AccountID, updated.CategoryID,
+	).Scan(&updated.AccountName, &updated.Currency, &updated.CategoryName); err != nil {
+		return nil, fmt.Errorf("select transaction labels: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -478,6 +560,9 @@ func (r *TransactionRepo) List(ctx context.Context, filters model.TransactionFil
 	}
 	if filters.Type != "" {
 		addCondition("t.type = $%d", filters.Type)
+	}
+	if filters.Kind != "" {
+		addCondition("t.kind = $%d", filters.Kind)
 	}
 	if filters.DateFrom != nil {
 		addCondition("t.date >= $%d", *filters.DateFrom)
@@ -514,11 +599,13 @@ func (r *TransactionRepo) List(ctx context.Context, filters model.TransactionFil
 	listArgs = append(listArgs, pageSize, offset)
 
 	query := fmt.Sprintf(`
-		SELECT t.id, t.user_id, t.account_id, t.category_id, t.type, t.amount, t.description, t.date, t.created_at,
-			a.name, c.name
+		SELECT t.id, t.user_id, t.account_id,
+		       COALESCE(t.category_id, '00000000-0000-0000-0000-000000000000'::uuid),
+		       t.type, t.amount, t.description, t.date, t.created_at, t.kind,
+		       a.name, a.currency, COALESCE(c.name, '')
 		FROM transactions t
 		JOIN accounts a ON a.id = t.account_id
-		JOIN categories c ON c.id = t.category_id%s
+		LEFT JOIN categories c ON c.id = t.category_id%s
 		ORDER BY t.date DESC, t.created_at DESC
 		LIMIT $%d OFFSET $%d
 	`, whereClause, len(args)+1, len(args)+2)
@@ -542,7 +629,9 @@ func (r *TransactionRepo) List(ctx context.Context, filters model.TransactionFil
 			&transaction.Description,
 			&transaction.Date,
 			&transaction.CreatedAt,
+			&transaction.Kind,
 			&transaction.AccountName,
+			&transaction.Currency,
 			&transaction.CategoryName,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scan transaction: %w", err)
@@ -557,7 +646,7 @@ func (r *TransactionRepo) List(ctx context.Context, filters model.TransactionFil
 }
 
 func (r *TransactionRepo) ForEachExportRow(ctx context.Context, filters model.TransactionFilters, emit func(model.TransactionExportRow) error) error {
-	conditions := make([]string, 0, 6)
+	conditions := []string{"t.kind = 'normal'"}
 	args := make([]interface{}, 0, 6)
 
 	addCondition := func(format string, value interface{}) {
@@ -631,9 +720,17 @@ func (r *TransactionRepo) CreateBatch(ctx context.Context, userID uuid.UUID, tra
 		_ = tx.Rollback(ctx)
 	}()
 
+	accountIDs := make([]uuid.UUID, 0, len(transactions))
+	for _, transaction := range transactions {
+		accountIDs = append(accountIDs, transaction.AccountID)
+	}
+	if err := lockAccounts(ctx, tx, userID, accountIDs); err != nil {
+		return err
+	}
+
 	const insert = `
-		INSERT INTO transactions (user_id, account_id, category_id, type, amount, description, date)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO transactions (user_id, account_id, category_id, type, amount, description, date, kind)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`
 
 	for _, transaction := range transactions {
@@ -645,20 +742,9 @@ func (r *TransactionRepo) CreateBatch(ctx context.Context, userID uuid.UUID, tra
 			transaction.Amount,
 			transaction.Description,
 			transaction.Date,
+			service.EntryKindNormal,
 		); err != nil {
 			return fmt.Errorf("insert transaction: %w", err)
-		}
-
-		delta := transaction.Amount
-		if transaction.Type == service.TypeExpense {
-			delta = -delta
-		}
-
-		if _, err := tx.Exec(ctx,
-			`UPDATE accounts SET balance = balance + $2, updated_at = NOW() WHERE id = $1 AND user_id = $3`,
-			transaction.AccountID, delta, userID,
-		); err != nil {
-			return fmt.Errorf("update account balance: %w", err)
 		}
 	}
 
@@ -679,35 +765,29 @@ func (r *TransactionRepo) Delete(ctx context.Context, userID uuid.UUID, id uuid.
 	}()
 
 	var (
-		accountID       uuid.UUID
-		transactionType string
-		amount          float64
+		accountID uuid.UUID
+		kind      string
 	)
 	err = tx.QueryRow(ctx,
-		`SELECT account_id, type, amount FROM transactions WHERE id = $1 AND user_id = $2 FOR UPDATE`,
+		`SELECT account_id, kind FROM transactions WHERE id = $1 AND user_id = $2 FOR UPDATE`,
 		id, userID,
-	).Scan(&accountID, &transactionType, &amount)
+	).Scan(&accountID, &kind)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return service.ErrTransactionNotFound
 		}
 		return fmt.Errorf("select transaction: %w", err)
 	}
+	if kind != "" && kind != service.EntryKindNormal {
+		return service.ErrSystemEntryImmutable
+	}
+
+	if err := lockAccounts(ctx, tx, userID, []uuid.UUID{accountID}); err != nil {
+		return err
+	}
 
 	if _, err := tx.Exec(ctx, `DELETE FROM transactions WHERE id = $1 AND user_id = $2`, id, userID); err != nil {
 		return fmt.Errorf("delete transaction: %w", err)
-	}
-
-	delta := -amount
-	if transactionType == service.TypeExpense {
-		delta = amount
-	}
-
-	if _, err := tx.Exec(ctx,
-		`UPDATE accounts SET balance = balance + $2, updated_at = NOW() WHERE id = $1`,
-		accountID, delta,
-	); err != nil {
-		return fmt.Errorf("restore account balance: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -717,23 +797,53 @@ func (r *TransactionRepo) Delete(ctx context.Context, userID uuid.UUID, id uuid.
 	return nil
 }
 
-func (r *TransactionRepo) MonthlyTotals(ctx context.Context, userID uuid.UUID, month time.Time) (float64, float64, error) {
+func (r *TransactionRepo) MonthlyTotalsByCurrency(ctx context.Context, userID uuid.UUID, month time.Time) ([]model.MonthlyCurrencyTotal, error) {
 	query := `
-		SELECT
-			COALESCE(SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END), 0)
-		FROM transactions
-		WHERE user_id = $1
-		  AND date >= DATE_TRUNC('month', $2::date)
-		  AND date < DATE_TRUNC('month', $2::date) + INTERVAL '1 month'
+		SELECT a.currency,
+		       COALESCE(SUM(CASE WHEN t.type = 'income' THEN t.amount ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN t.type = 'expense' THEN t.amount ELSE 0 END), 0)
+		FROM transactions t
+		JOIN accounts a ON a.id = t.account_id
+		WHERE t.user_id = $1
+		  AND t.kind = 'normal'
+		  AND t.date >= DATE_TRUNC('month', $2::date)
+		  AND t.date < DATE_TRUNC('month', $2::date) + INTERVAL '1 month'
+		GROUP BY a.currency
+		ORDER BY a.currency
 	`
 
-	var income, expense float64
-	if err := r.pool.QueryRow(ctx, query, userID, month).Scan(&income, &expense); err != nil {
-		return 0, 0, fmt.Errorf("select monthly totals: %w", err)
+	rows, err := r.pool.Query(ctx, query, userID, month)
+	if err != nil {
+		return nil, fmt.Errorf("select monthly totals: %w", err)
+	}
+	defer rows.Close()
+
+	totals := make([]model.MonthlyCurrencyTotal, 0, 4)
+	for rows.Next() {
+		var total model.MonthlyCurrencyTotal
+		if err := rows.Scan(&total.Currency, &total.Income, &total.Expense); err != nil {
+			return nil, fmt.Errorf("scan monthly total: %w", err)
+		}
+		totals = append(totals, total)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate monthly totals: %w", err)
 	}
 
-	return income, expense, nil
+	return totals, nil
+}
+
+func lockAccounts(ctx context.Context, tx pgx.Tx, userID uuid.UUID, ids []uuid.UUID) error {
+	sorted := append([]uuid.UUID(nil), ids...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].String() < sorted[j].String() })
+
+	for _, id := range sorted {
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM accounts WHERE id = $1 AND user_id = $2 FOR UPDATE`, id, userID); err != nil {
+			return fmt.Errorf("lock account: %w", err)
+		}
+	}
+
+	return nil
 }
 
 func isUniqueViolation(err error) bool {

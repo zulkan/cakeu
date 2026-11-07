@@ -93,6 +93,10 @@ export function TransactionFormModal({
 
   const isEditing = Boolean(transaction);
   const type = useWatch({ control, name: 'type' });
+  const accountId = useWatch({ control, name: 'account_id' });
+  const selectedCurrency = accounts.find(
+    (account) => account.id === accountId
+  )?.currency;
   const filteredCategories = categories.filter(
     (category) => category.type === type
   );
@@ -261,7 +265,7 @@ export function TransactionFormModal({
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div className="space-y-1.5">
             <label htmlFor="transaction-amount" className={labelClass}>
-              Amount
+              {selectedCurrency ? `Amount (${selectedCurrency})` : 'Amount'}
             </label>
             <input
               id="transaction-amount"

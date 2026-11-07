@@ -1,5 +1,6 @@
 import type {
   Account,
+  AdjustAccountRequest,
   Budget,
   BudgetStatus,
   CashflowPoint,
@@ -142,6 +143,11 @@ export const api = {
   updateAccount: (id: string, data: UpdateAccountRequest) =>
     request<Account>(`/accounts/${id}`, {
       method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+  adjustAccountBalance: (id: string, data: AdjustAccountRequest) =>
+    request<Account>(`/accounts/${id}/adjustments`, {
+      method: 'POST',
       body: JSON.stringify(data),
     }),
   deleteAccount: (id: string) =>

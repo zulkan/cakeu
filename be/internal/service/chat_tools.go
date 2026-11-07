@@ -92,12 +92,12 @@ var chatTools = []llm.Tool{
 		Type: "function",
 		Function: llm.FunctionDef{
 			Name:        "create_account",
-			Description: "Create a new account (wallet or bank balance).",
+			Description: "Create a new account. The opening balance becomes a locked opening entry.",
 			Parameters: json.RawMessage(`{
 				"type":"object",
 				"properties":{
 					"name":{"type":"string"},
-					"balance":{"type":"number","minimum":0},
+					"opening_balance":{"type":"number","description":"Amount already in the account; may be negative for credit cards"},
 					"currency":{"type":"string","description":"Three-letter code, defaults to USD"}
 				},
 				"required":["name"],
@@ -126,16 +126,32 @@ var chatTools = []llm.Tool{
 		Type: "function",
 		Function: llm.FunctionDef{
 			Name:        "update_account",
-			Description: "Rename an account or change its balance or currency.",
+			Description: "Rename an account or change its currency before the first entry.",
 			Parameters: json.RawMessage(`{
 				"type":"object",
 				"properties":{
 					"account":{"type":"string","description":"Current account name"},
 					"name":{"type":"string","description":"New name"},
-					"balance":{"type":"number"},
 					"currency":{"type":"string"}
 				},
 				"required":["account"],
+				"additionalProperties":false
+			}`),
+		},
+	},
+	{
+		Type: "function",
+		Function: llm.FunctionDef{
+			Name:        "adjust_account_balance",
+			Description: "Correct an account to a real-world balance by recording a locked adjustment entry.",
+			Parameters: json.RawMessage(`{
+				"type":"object",
+				"properties":{
+					"account":{"type":"string","description":"Exact account name"},
+					"target_balance":{"type":"number","description":"The balance the account should have now"},
+					"description":{"type":"string","description":"Optional reason for the adjustment"}
+				},
+				"required":["account","target_balance"],
 				"additionalProperties":false
 			}`),
 		},

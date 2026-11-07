@@ -3,6 +3,7 @@ import { Plus, Wallet } from 'lucide-react';
 import { useAccountStore } from '../stores/accountStore';
 import type {
   Account,
+  AdjustAccountRequest,
   CreateAccountRequest,
   UpdateAccountRequest,
 } from '../types';
@@ -12,6 +13,7 @@ import { EmptyState, ErrorState, LoadingState } from '../components/ui/States';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { AccountFormModal } from '../components/accounts/AccountFormModal';
 import { AccountCard } from '../components/accounts/AccountCard';
+import { AdjustBalanceModal } from '../components/accounts/AdjustBalanceModal';
 
 function Accounts() {
   const accounts = useAccountStore((state) => state.accounts);
@@ -20,9 +22,11 @@ function Accounts() {
   const fetchAccounts = useAccountStore((state) => state.fetchAccounts);
   const createAccount = useAccountStore((state) => state.createAccount);
   const updateAccount = useAccountStore((state) => state.updateAccount);
+  const adjustBalance = useAccountStore((state) => state.adjustBalance);
   const deleteAccount = useAccountStore((state) => state.deleteAccount);
 
   const [modalOpen, setModalOpen] = useState(false);
+  const [adjustTarget, setAdjustTarget] = useState<Account | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Account | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -37,6 +41,10 @@ function Accounts() {
 
   const handleUpdate = async (id: string, data: UpdateAccountRequest) => {
     await updateAccount(id, data);
+  };
+
+  const handleAdjust = async (id: string, data: AdjustAccountRequest) => {
+    await adjustBalance(id, data);
   };
 
   const handleDelete = async () => {
@@ -98,6 +106,7 @@ function Accounts() {
               key={account.id}
               account={account}
               onUpdate={handleUpdate}
+              onAdjust={setAdjustTarget}
               onDelete={(target) => {
                 setDeleteError(null);
                 setDeleteTarget(target);
@@ -112,6 +121,16 @@ function Accounts() {
         onClose={() => setModalOpen(false)}
         onSubmit={handleCreate}
       />
+
+      {adjustTarget && (
+        <AdjustBalanceModal
+          key={adjustTarget.id}
+          open
+          account={adjustTarget}
+          onClose={() => setAdjustTarget(null)}
+          onSubmit={handleAdjust}
+        />
+      )}
 
       <ConfirmDialog
         open={deleteTarget !== null}

@@ -10,6 +10,8 @@ const account: Account = {
   id: 'account-1',
   name: 'Everyday checking',
   balance: 1250,
+  opening_balance: 1000,
+  entry_count: 1,
   currency: 'USD',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
@@ -32,6 +34,7 @@ describe('Accounts page', () => {
       fetchAccounts: vi.fn(async () => undefined),
       createAccount: vi.fn(async () => account),
       updateAccount: vi.fn(async () => undefined),
+      adjustBalance: vi.fn(async () => undefined),
       deleteAccount: vi.fn(async () => undefined),
     });
   });
@@ -53,8 +56,8 @@ describe('Accounts page', () => {
 
     const dialog = screen.getByRole('dialog');
     await user.type(within(dialog).getByLabelText('Name'), 'Savings');
-    await user.clear(within(dialog).getByLabelText('Starting balance'));
-    await user.type(within(dialog).getByLabelText('Starting balance'), '500');
+    await user.clear(within(dialog).getByLabelText('Opening balance'));
+    await user.type(within(dialog).getByLabelText('Opening balance'), '500');
     await user.selectOptions(within(dialog).getByLabelText('Currency'), 'EUR');
     await user.click(
       within(dialog).getByRole('button', { name: /create account/i })
@@ -67,7 +70,7 @@ describe('Accounts page', () => {
     await waitFor(() => {
       expect(createAccount).toHaveBeenCalledWith({
         name: 'Savings',
-        balance: 500,
+        opening_balance: 500,
         currency: 'EUR',
       });
     });
@@ -77,19 +80,16 @@ describe('Accounts page', () => {
     });
   });
 
-  it('renames and updates the balance inline', async () => {
+  it('renames an account without a balance field', async () => {
     const user = userEvent.setup();
     renderAccounts();
 
     await user.click(screen.getByRole('button', { name: /edit/i }));
 
     const nameInput = screen.getByLabelText('Name');
-    const balanceInput = screen.getByLabelText('Balance');
 
     await user.clear(nameInput);
     await user.type(nameInput, 'Main checking');
-    await user.clear(balanceInput);
-    await user.type(balanceInput, '2000');
     await user.click(screen.getByRole('button', { name: /save/i }));
 
     const updateAccount = vi.mocked(
@@ -99,7 +99,6 @@ describe('Accounts page', () => {
     await waitFor(() => {
       expect(updateAccount).toHaveBeenCalledWith(account.id, {
         name: 'Main checking',
-        balance: 2000,
       });
     });
 
@@ -107,6 +106,34 @@ describe('Accounts page', () => {
       expect(
         screen.queryByRole('button', { name: /save/i })
       ).not.toBeInTheDocument();
+    });
+  });
+
+  it('records an adjustment from the adjust balance modal', async () => {
+    const user = userEvent.setup();
+    renderAccounts();
+
+    await user.click(
+      screen.getByRole('button', { name: /adjust balance/i })
+    );
+
+    const dialog = screen.getByRole('dialog');
+    const target = within(dialog).getByLabelText('Actual balance');
+    await user.clear(target);
+    await user.type(target, '2000');
+    await user.click(
+      within(dialog).getByRole('button', { name: /record adjustment/i })
+    );
+
+    const adjustBalance = vi.mocked(
+      useAccountStore.getState().adjustBalance
+    );
+
+    await waitFor(() => {
+      expect(adjustBalance).toHaveBeenCalledWith(account.id, {
+        target_balance: 2000,
+        description: undefined,
+      });
     });
   });
 

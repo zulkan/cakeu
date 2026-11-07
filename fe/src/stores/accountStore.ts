@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type {
   Account,
+  AdjustAccountRequest,
   CreateAccountRequest,
   UpdateAccountRequest,
 } from '../types';
@@ -13,6 +14,7 @@ interface AccountState {
   fetchAccounts: () => Promise<void>;
   createAccount: (data: CreateAccountRequest) => Promise<Account>;
   updateAccount: (id: string, data: UpdateAccountRequest) => Promise<void>;
+  adjustBalance: (id: string, data: AdjustAccountRequest) => Promise<void>;
   deleteAccount: (id: string) => Promise<void>;
 }
 
@@ -36,6 +38,12 @@ export const useAccountStore = create<AccountState>()((set) => ({
   },
   updateAccount: async (id, data) => {
     const updated = await api.updateAccount(id, data);
+    set((s) => ({
+      accounts: s.accounts.map((a) => (a.id === id ? updated : a)),
+    }));
+  },
+  adjustBalance: async (id, data) => {
+    const updated = await api.adjustAccountBalance(id, data);
     set((s) => ({
       accounts: s.accounts.map((a) => (a.id === id ? updated : a)),
     }));

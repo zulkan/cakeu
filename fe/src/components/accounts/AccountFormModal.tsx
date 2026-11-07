@@ -11,11 +11,11 @@ import { errorClass, inputClass, labelClass } from '../ui/formStyles';
 
 const accountSchema = z.object({
   name: z.string().min(1, 'Account name is required').max(80, 'Keep it short'),
-  balance: z
+  opening_balance: z
     .string()
-    .min(1, 'Enter a starting balance')
+    .min(1, 'Enter an opening balance')
     .refine(
-      (value) => Number.isFinite(Number(value)) && Number(value) >= 0,
+      (value) => Number.isFinite(Number(value)),
       'Enter a valid amount'
     ),
   currency: z.string().min(1, 'Choose a currency'),
@@ -44,12 +44,12 @@ export function AccountFormModal({
     formState: { errors, isSubmitting },
   } = useForm<AccountFormData>({
     resolver: zodResolver(accountSchema),
-    defaultValues: { name: '', balance: '0', currency: 'USD' },
+    defaultValues: { name: '', opening_balance: '0', currency: 'USD' },
   });
 
   useEffect(() => {
     if (!open) return;
-    reset({ name: '', balance: '0', currency: 'USD' });
+    reset({ name: '', opening_balance: '0', currency: 'USD' });
   }, [open, reset]);
 
   const handleClose = () => {
@@ -63,7 +63,7 @@ export function AccountFormModal({
     try {
       await onSubmit({
         name: data.name.trim(),
-        balance: Number(data.balance),
+        opening_balance: Number(data.opening_balance),
         currency: data.currency,
       });
       handleClose();
@@ -115,24 +115,28 @@ export function AccountFormModal({
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div className="space-y-1.5">
             <label htmlFor="account-balance" className={labelClass}>
-              Starting balance
+              Opening balance
             </label>
             <input
               id="account-balance"
               type="number"
-              min="0"
               step="0.01"
               inputMode="decimal"
-              aria-invalid={errors.balance ? 'true' : 'false'}
+              aria-invalid={errors.opening_balance ? 'true' : 'false'}
               aria-describedby={
-                errors.balance ? 'account-balance-error' : undefined
+                errors.opening_balance ? 'account-balance-error' : 'account-balance-hint'
               }
-              {...register('balance')}
+              {...register('opening_balance')}
               className={inputClass}
             />
-            {errors.balance && (
+            {errors.opening_balance ? (
               <p id="account-balance-error" className={errorClass}>
-                {errors.balance.message}
+                {errors.opening_balance.message}
+              </p>
+            ) : (
+              <p id="account-balance-hint" className="text-xs text-stone-400">
+                The amount already in this account. It becomes a locked opening
+                entry; use a negative amount for credit cards or overdrafts.
               </p>
             )}
           </div>

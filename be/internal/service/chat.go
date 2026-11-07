@@ -36,6 +36,7 @@ const (
 Rules:
 - Never invent amounts, dates or balances. If you need data, call a tool.
 - Refer to accounts and categories by their exact names; the server resolves names to records.
+- An account's opening balance is a locked ledger entry. To correct a balance, use adjust_account_balance; never try to overwrite it.
 - Before deleting anything, call the delete tool; the user must confirm before it executes.
 - If a tool returns an error, explain it plainly instead of retrying blindly.
 - Answer briefly and in the user's language.`
@@ -273,6 +274,8 @@ func (s *ChatService) executeTool(ctx context.Context, userID uuid.UUID, fileID,
 		return s.createCategory(ctx, userID, call.Function.Arguments)
 	case "update_account":
 		return s.updateAccount(ctx, userID, call.Function.Arguments)
+	case "adjust_account_balance":
+		return s.adjustAccountBalance(ctx, userID, call.Function.Arguments)
 	case "delete_account":
 		return s.requestDeleteAccount(ctx, userID, call.Function.Arguments)
 	case "delete_category":

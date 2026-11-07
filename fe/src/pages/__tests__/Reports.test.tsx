@@ -16,6 +16,8 @@ const account: Account = {
   id: 'account-1',
   name: 'Everyday checking',
   balance: 1250,
+  opening_balance: 1250,
+  entry_count: 1,
   currency: 'USD',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',

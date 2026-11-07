@@ -31,6 +31,8 @@ const account: Account = {
   id: 'account-1',
   name: 'Everyday checking',
   balance: 1250,
+  opening_balance: 1250,
+  entry_count: 1,
   currency: 'USD',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
@@ -55,13 +57,13 @@ const transaction: Transaction = {
   created_at: '2026-10-20T00:00:00Z',
   account_name: account.name,
   category_name: category.name,
+  kind: 'normal',
+  currency: 'USD',
 };
 
 const summary: DashboardSummary = {
-  total_balance: 1250,
-  monthly_income: 3000,
-  monthly_expense: 1750,
-  monthly_net: 1250,
+  balances: [{ currency: 'USD', total: 1250 }],
+  monthly: [{ currency: 'USD', income: 3000, expense: 1750, net: 1250 }],
   transaction_count: 1,
   recent_transactions: [transaction],
 };
@@ -113,7 +115,7 @@ describe('finance stores', () => {
 
       await useAccountStore.getState().createAccount({
         name: account.name,
-        balance: account.balance,
+        opening_balance: account.opening_balance,
         currency: account.currency,
       });
 
@@ -121,13 +123,12 @@ describe('finance stores', () => {
     });
 
     it('replaces an updated account', async () => {
-      const updated = { ...account, name: 'Main checking', balance: 2000 };
+      const updated = { ...account, name: 'Main checking' };
       useAccountStore.setState({ accounts: [account] });
       vi.mocked(api.updateAccount).mockResolvedValue(updated);
 
       await useAccountStore.getState().updateAccount(account.id, {
         name: updated.name,
-        balance: updated.balance,
       });
 
       expect(useAccountStore.getState().accounts).toEqual([updated]);

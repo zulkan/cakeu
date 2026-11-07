@@ -7,12 +7,10 @@ import { EmptyState } from '../ui/States';
 
 interface RecentTransactionsProps {
   transactions: Transaction[];
-  currency: string;
 }
 
 export function RecentTransactions({
   transactions,
-  currency,
 }: RecentTransactionsProps) {
   return (
     <Card className="p-5">
@@ -76,7 +74,10 @@ export function RecentTransactions({
                   }`}
                 >
                   {isIncome ? '+' : '−'}
-                  {formatCurrency(Math.abs(transaction.amount), currency)}
+                  {formatCurrency(
+                    Math.abs(transaction.amount),
+                    transaction.currency
+                  )}
                 </span>
               </li>
             );

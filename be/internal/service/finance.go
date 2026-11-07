@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,15 +16,19 @@ import (
 )
 
 var (
-	ErrAccountNotFound     = errors.New("account not found")
-	ErrCategoryNotFound    = errors.New("category not found")
-	ErrTransactionNotFound = errors.New("transaction not found")
-	ErrAccountNameExists   = errors.New("account name already exists")
-	ErrCategoryNameExists  = errors.New("category name already exists")
-	ErrInvalidAmount       = errors.New("amount must be positive")
-	ErrInvalidType         = errors.New("type must be income or expense")
-	ErrInvalidName         = errors.New("name is required")
-	ErrInvalidCurrency     = errors.New("currency must be a 3-letter code")
+	ErrAccountNotFound       = errors.New("account not found")
+	ErrCategoryNotFound      = errors.New("category not found")
+	ErrTransactionNotFound   = errors.New("transaction not found")
+	ErrAccountNameExists     = errors.New("account name already exists")
+	ErrCategoryNameExists    = errors.New("category name already exists")
+	ErrInvalidAmount         = errors.New("amount must be positive")
+	ErrInvalidType           = errors.New("type must be income or expense")
+	ErrInvalidName           = errors.New("name is required")
+	ErrInvalidCurrency       = errors.New("currency must be a 3-letter code")
+	ErrUseAdjustmentEndpoint = errors.New("use the account adjustment endpoint to change a balance")
+	ErrCurrencyLocked        = errors.New("currency is locked after the first entry")
+	ErrSystemEntryImmutable  = errors.New("system entries cannot be modified")
+	ErrInvalidBalance        = errors.New("balance must be a finite number")
 )
 
 const (
@@ -30,6 +36,13 @@ const (
 	TypeIncome = "income"
 	// TypeExpense marks money flowing out of an account.
 	TypeExpense = "expense"
+
+	// EntryKindNormal is a user, import, or recurring transaction.
+	EntryKindNormal = "normal"
+	// EntryKindOpening is the locked entry that seeds an account balance.
+	EntryKindOpening = "opening"
+	// EntryKindAdjustment is a locked correction to a real-world balance.
+	EntryKindAdjustment = "adjustment"
 
 	// DefaultCurrency is used when a request omits a currency.
 	DefaultCurrency = "USD"
@@ -43,10 +56,11 @@ const (
 )
 
 type AccountRepository interface {
-	Create(ctx context.Context, userID uuid.UUID, name string, balance float64, currency string) (*model.Account, error)
+	Create(ctx context.Context, userID uuid.UUID, name string, openingBalance float64, currency string) (*model.Account, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*model.Account, error)
 	ListByUser(ctx context.Context, userID uuid.UUID) ([]model.Account, error)
-	Update(ctx context.Context, userID uuid.UUID, id uuid.UUID, name *string, balance *float64, currency *string) (*model.Account, error)
+	Update(ctx context.Context, userID uuid.UUID, id uuid.UUID, name *string, currency *string) (*model.Account, error)
+	AdjustBalance(ctx context.Context, userID uuid.UUID, id uuid.UUID, targetBalance float64, description string) (*model.Account, error)
 	Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
 }
 
@@ -65,7 +79,7 @@ type TransactionRepository interface {
 	CreateBatch(ctx context.Context, userID uuid.UUID, transactions []model.Transaction) error
 	Update(ctx context.Context, userID uuid.UUID, transaction model.Transaction) (*model.Transaction, error)
 	Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
-	MonthlyTotals(ctx context.Context, userID uuid.UUID, month time.Time) (income float64, expense float64, err error)
+	MonthlyTotalsByCurrency(ctx context.Context, userID uuid.UUID, month time.Time) ([]model.MonthlyCurrencyTotal, error)
 }
 
 type AccountService interface {
@@ -73,6 +87,7 @@ type AccountService interface {
 	GetAccount(ctx context.Context, id uuid.UUID) (*model.Account, error)
 	ListAccounts(ctx context.Context, userID uuid.UUID) ([]model.Account, error)
 	UpdateAccount(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.UpdateAccountRequest) (*model.Account, error)
+	AdjustAccountBalance(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.AdjustAccountRequest) (*model.Account, error)
 	DeleteAccount(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
 }
 
@@ -108,13 +123,16 @@ func (s *accountService) CreateAccount(ctx context.Context, userID uuid.UUID, re
 	if name == "" {
 		return nil, ErrInvalidName
 	}
+	if math.IsNaN(req.OpeningBalance) || math.IsInf(req.OpeningBalance, 0) {
+		return nil, ErrInvalidBalance
+	}
 
 	currency := normalizeCurrency(req.Currency)
 	if currency == "" {
 		currency = DefaultCurrency
 	}
 
-	account, err := s.repo.Create(ctx, userID, name, req.Balance, currency)
+	account, err := s.repo.Create(ctx, userID, name, req.OpeningBalance, currency)
 	if err != nil {
 		if errors.Is(err, ErrAccountNameExists) {
 			return nil, ErrAccountNameExists
@@ -150,6 +168,10 @@ func (s *accountService) ListAccounts(ctx context.Context, userID uuid.UUID) ([]
 }
 
 func (s *accountService) UpdateAccount(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.UpdateAccountRequest) (*model.Account, error) {
+	if req.Balance != nil {
+		return nil, ErrUseAdjustmentEndpoint
+	}
+
 	if req.Name != nil {
 		name := strings.TrimSpace(*req.Name)
 		if name == "" {
@@ -166,7 +188,7 @@ func (s *accountService) UpdateAccount(ctx context.Context, userID uuid.UUID, id
 		req.Currency = &currency
 	}
 
-	account, err := s.repo.Update(ctx, userID, id, req.Name, req.Balance, req.Currency)
+	account, err := s.repo.Update(ctx, userID, id, req.Name, req.Currency)
 	if err != nil {
 		if errors.Is(err, ErrAccountNotFound) {
 			return nil, ErrAccountNotFound
@@ -174,7 +196,31 @@ func (s *accountService) UpdateAccount(ctx context.Context, userID uuid.UUID, id
 		if errors.Is(err, ErrAccountNameExists) {
 			return nil, ErrAccountNameExists
 		}
+		if errors.Is(err, ErrCurrencyLocked) {
+			return nil, ErrCurrencyLocked
+		}
 		return nil, fmt.Errorf("update account: %w", err)
+	}
+
+	return account, nil
+}
+
+func (s *accountService) AdjustAccountBalance(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.AdjustAccountRequest) (*model.Account, error) {
+	if math.IsNaN(req.TargetBalance) || math.IsInf(req.TargetBalance, 0) {
+		return nil, ErrInvalidBalance
+	}
+
+	description := strings.TrimSpace(req.Description)
+	if description == "" {
+		description = "Balance adjustment"
+	}
+
+	account, err := s.repo.AdjustBalance(ctx, userID, id, req.TargetBalance, description)
+	if err != nil {
+		if errors.Is(err, ErrAccountNotFound) {
+			return nil, ErrAccountNotFound
+		}
+		return nil, fmt.Errorf("adjust account balance: %w", err)
 	}
 
 	return account, nil
@@ -323,6 +369,7 @@ func (s *transactionService) CreateTransaction(ctx context.Context, userID uuid.
 		Amount:      req.Amount,
 		Description: strings.TrimSpace(req.Description),
 		Date:        date,
+		Kind:        EntryKindNormal,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create transaction: %w", err)
@@ -407,6 +454,9 @@ func (s *transactionService) UpdateTransaction(ctx context.Context, userID uuid.
 	if existing.UserID != userID {
 		return nil, ErrTransactionNotFound
 	}
+	if existing.Kind != "" && existing.Kind != EntryKindNormal {
+		return nil, ErrSystemEntryImmutable
+	}
 
 	updated := *existing
 
@@ -471,6 +521,9 @@ func (s *transactionService) UpdateTransaction(ctx context.Context, userID uuid.
 		if errors.Is(err, ErrTransactionNotFound) {
 			return nil, ErrTransactionNotFound
 		}
+		if errors.Is(err, ErrSystemEntryImmutable) {
+			return nil, ErrSystemEntryImmutable
+		}
 		return nil, fmt.Errorf("update transaction: %w", err)
 	}
 
@@ -481,6 +534,9 @@ func (s *transactionService) DeleteTransaction(ctx context.Context, userID uuid.
 	if err := s.repo.Delete(ctx, userID, id); err != nil {
 		if errors.Is(err, ErrTransactionNotFound) {
 			return ErrTransactionNotFound
+		}
+		if errors.Is(err, ErrSystemEntryImmutable) {
+			return ErrSystemEntryImmutable
 		}
 		return fmt.Errorf("delete transaction: %w", err)
 	}
@@ -494,18 +550,47 @@ func (s *transactionService) GetDashboardSummary(ctx context.Context, userID uui
 		return nil, fmt.Errorf("list accounts: %w", err)
 	}
 
-	var totalBalance float64
+	totals := make(map[string]float64, len(accounts))
 	for _, account := range accounts {
-		totalBalance += account.Balance
+		totals[account.Currency] += account.Balance
 	}
+	balances := make([]model.CurrencyTotal, 0, len(totals))
+	for currency, total := range totals {
+		balances = append(balances, model.CurrencyTotal{Currency: currency, Total: total})
+	}
+	sort.Slice(balances, func(i, j int) bool {
+		return balances[i].Currency < balances[j].Currency
+	})
 
-	income, expense, err := s.repo.MonthlyTotals(ctx, userID, time.Now().UTC())
+	now := time.Now().UTC()
+	monthly, err := s.repo.MonthlyTotalsByCurrency(ctx, userID, now)
 	if err != nil {
 		return nil, fmt.Errorf("monthly totals: %w", err)
 	}
+	for i := range monthly {
+		monthly[i].Net = monthly[i].Income - monthly[i].Expense
+	}
+	if monthly == nil {
+		monthly = []model.MonthlyCurrencyTotal{}
+	}
 
-	recent, total, err := s.repo.List(ctx, model.TransactionFilters{
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	monthEnd := monthStart.AddDate(0, 1, 0).AddDate(0, 0, -1)
+	_, total, err := s.repo.List(ctx, model.TransactionFilters{
 		UserID:   &userID,
+		Kind:     EntryKindNormal,
+		DateFrom: &monthStart,
+		DateTo:   &monthEnd,
+		Page:     1,
+		PageSize: 1,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("count transactions: %w", err)
+	}
+
+	recent, _, err := s.repo.List(ctx, model.TransactionFilters{
+		UserID:   &userID,
+		Kind:     EntryKindNormal,
 		Page:     1,
 		PageSize: 10,
 	})
@@ -517,10 +602,8 @@ func (s *transactionService) GetDashboardSummary(ctx context.Context, userID uui
 	}
 
 	return &model.DashboardSummary{
-		TotalBalance:       totalBalance,
-		MonthlyIncome:      income,
-		MonthlyExpense:     expense,
-		MonthlyNet:         income - expense,
+		Balances:           balances,
+		Monthly:            monthly,
 		TransactionCount:   total,
 		RecentTransactions: recent,
 	}, nil

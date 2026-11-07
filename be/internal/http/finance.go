@@ -26,6 +26,7 @@ type AccountService interface {
 	GetAccount(ctx context.Context, id uuid.UUID) (*model.Account, error)
 	ListAccounts(ctx context.Context, userID uuid.UUID) ([]model.Account, error)
 	UpdateAccount(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.UpdateAccountRequest) (*model.Account, error)
+	AdjustAccountBalance(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.AdjustAccountRequest) (*model.Account, error)
 	DeleteAccount(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
 }
 
@@ -102,8 +103,10 @@ func handleCreateAccount(accounts AccountService) http.HandlerFunc {
 			return
 		}
 
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
 		var req model.CreateAccountRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decoder.Decode(&req); err != nil {
 			respondError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
@@ -151,8 +154,55 @@ func handleUpdateAccount(accounts AccountService) http.HandlerFunc {
 			respondError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
+		if req.Balance != nil {
+			respondError(w, http.StatusBadRequest, service.ErrUseAdjustmentEndpoint.Error())
+			return
+		}
 
 		account, err := accounts.UpdateAccount(r.Context(), userID, id, req)
+		if err != nil {
+			respondServiceError(w, err)
+			return
+		}
+
+		respondJSON(w, http.StatusOK, account)
+	}
+}
+
+// AdjustAccountBalance godoc
+// @Summary Adjust an account balance
+// @Description Record a locked adjustment entry so the account matches a real-world balance
+// @Tags accounts
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param id path string true "Account ID"
+// @Param request body model.AdjustAccountRequest true "Adjustment request"
+// @Success 200 {object} model.Account
+// @Failure 400 {object} model.ErrorResponse
+// @Failure 401 {object} model.ErrorResponse
+// @Failure 404 {object} model.ErrorResponse
+// @Router /api/accounts/{id}/adjustments [post]
+func handleAdjustAccountBalance(accounts AccountService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, err := userIDFromContext(r.Context())
+		if err != nil {
+			respondError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		id, ok := parseUUIDPath(w, r, "id")
+		if !ok {
+			return
+		}
+
+		var req model.AdjustAccountRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		account, err := accounts.AdjustAccountBalance(r.Context(), userID, id, req)
 		if err != nil {
 			respondServiceError(w, err)
 			return
@@ -762,9 +812,14 @@ func respondServiceError(w http.ResponseWriter, err error) {
 		errors.Is(err, service.ErrInvalidType),
 		errors.Is(err, service.ErrInvalidName),
 		errors.Is(err, service.ErrInvalidCurrency),
+		errors.Is(err, service.ErrInvalidBalance),
+		errors.Is(err, service.ErrUseAdjustmentEndpoint),
 		errors.Is(err, service.ErrImportTooManyRows),
 		errors.Is(err, service.ErrImportMissingColumns):
 		respondError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, service.ErrCurrencyLocked),
+		errors.Is(err, service.ErrSystemEntryImmutable):
+		respondError(w, http.StatusConflict, err.Error())
 	default:
 		respondError(w, http.StatusInternalServerError, "internal server error")
 	}

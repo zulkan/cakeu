@@ -219,7 +219,7 @@ Down:
 
 ### Transactions
 
-- List/get responses include `kind`, `currency`, nullable `category_id`, and possibly empty `category_name`.
+- List/get responses include `kind`, `currency`, a zero-UUID `category_id` for system entries, and an empty `category_name`. Clients detect system entries by `kind`.
 - `PATCH` and `DELETE` on a system entry return `409 system entries cannot be modified`.
 
 ## Backend changes

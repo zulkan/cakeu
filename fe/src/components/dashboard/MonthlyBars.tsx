@@ -20,7 +20,7 @@ export function MonthlyBars({ income, expense, currency }: MonthlyBarsProps) {
           <p className="text-xs text-stone-500">Income vs. expense</p>
         </div>
         <span className="rounded-full bg-warm-100 px-2.5 py-1 text-xs font-semibold text-warm-800">
-          Live
+          {currency}
         </span>
       </div>
 

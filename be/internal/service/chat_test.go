@@ -188,7 +188,7 @@ func TestChatServiceCreatesAccount(t *testing.T) {
 			ToolCalls: []llm.ToolCall{{
 				ID:       "call_create_account",
 				Type:     "function",
-				Function: llm.FunctionCall{Name: "create_account", Arguments: `{"name":"Savings","balance":250,"currency":"USD"}`},
+				Function: llm.FunctionCall{Name: "create_account", Arguments: `{"name":"Savings","opening_balance":250,"currency":"USD"}`},
 			}},
 		},
 		{Role: "assistant", Content: "Created the Savings account."},
@@ -201,13 +201,52 @@ func TestChatServiceCreatesAccount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if accountRepo.lastCreate.name != "Savings" || accountRepo.lastCreate.balance != 250 || accountRepo.lastCreate.currency != "USD" {
+	if accountRepo.lastCreate.name != "Savings" || accountRepo.lastCreate.openingBalance != 250 || accountRepo.lastCreate.currency != "USD" {
 		t.Fatalf("unexpected created account: %+v", accountRepo.lastCreate)
 	}
 	if accountRepo.lastCreate.userID != userID {
 		t.Fatalf("expected account scoped to caller %s, got %s", userID, accountRepo.lastCreate.userID)
 	}
 	if len(response.ToolCalls) != 1 || response.ToolCalls[0].Summary != `Created account "Savings"` {
+		t.Fatalf("unexpected tool calls: %+v", response.ToolCalls)
+	}
+}
+
+func TestChatServiceAdjustsAccountBalance(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	accountID := uuid.New()
+	accountRepo := &fakeAccountRepo{accounts: []model.Account{
+		{ID: accountID, UserID: userID, Name: "Cash", Balance: 100, Currency: "USD"},
+	}}
+	accounts := service.NewAccountService(accountRepo)
+	categories := service.NewCategoryService(&fakeCategoryRepo{})
+	transactions := service.NewTransactionService(&fakeTransactionRepo{}, &fakeAccountRepo{}, &fakeCategoryRepo{})
+
+	client := &fakeLLMClient{responses: []llm.Message{
+		{
+			Role: "assistant",
+			ToolCalls: []llm.ToolCall{{
+				ID:       "call_adjust_account",
+				Type:     "function",
+				Function: llm.FunctionCall{Name: "adjust_account_balance", Arguments: `{"account":"Cash","target_balance":250}`},
+			}},
+		},
+		{Role: "assistant", Content: "Adjusted the Cash account."},
+	}}
+	chat := service.NewChatService(accounts, categories, transactions, nil, nil, nil, client, nil)
+
+	response, err := chat.Handle(context.Background(), userID, model.ChatRequest{
+		Messages: []model.ChatMessage{{Role: "user", Content: "Set Cash to 250"}},
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if accountRepo.lastAdjust.TargetBalance != 250 {
+		t.Fatalf("expected target 250, got %v", accountRepo.lastAdjust.TargetBalance)
+	}
+	if len(response.ToolCalls) != 1 || response.ToolCalls[0].Name != "adjust_account_balance" {
 		t.Fatalf("unexpected tool calls: %+v", response.ToolCalls)
 	}
 }

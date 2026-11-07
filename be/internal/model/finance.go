@@ -7,13 +7,15 @@ import (
 )
 
 type Account struct {
-	ID        uuid.UUID `json:"id"`
-	UserID    uuid.UUID `json:"user_id"`
-	Name      string    `json:"name"`
-	Balance   float64   `json:"balance"`
-	Currency  string    `json:"currency"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID             uuid.UUID `json:"id"`
+	UserID         uuid.UUID `json:"user_id"`
+	Name           string    `json:"name"`
+	Balance        float64   `json:"balance"`
+	OpeningBalance float64   `json:"opening_balance"`
+	EntryCount     int       `json:"entry_count"`
+	Currency       string    `json:"currency"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type Category struct {
@@ -37,6 +39,8 @@ type Transaction struct {
 	CreatedAt    time.Time `json:"created_at"`
 	AccountName  string    `json:"account_name"`
 	CategoryName string    `json:"category_name"`
+	Kind         string    `json:"kind"`
+	Currency     string    `json:"currency"`
 }
 
 type TransactionExportRow struct {
@@ -113,15 +117,24 @@ type ImportResult struct {
 }
 
 type CreateAccountRequest struct {
-	Name     string  `json:"name" example:"Checking Account"`
-	Balance  float64 `json:"balance" example:"1000.00"`
-	Currency string  `json:"currency" example:"USD"`
+	Name           string  `json:"name" example:"Checking Account"`
+	OpeningBalance float64 `json:"opening_balance" example:"1000.00"`
+	Currency       string  `json:"currency" example:"USD"`
 }
 
 type UpdateAccountRequest struct {
-	Name     *string  `json:"name,omitempty" example:"Savings Account"`
-	Balance  *float64 `json:"balance,omitempty" example:"2500.00"`
-	Currency *string  `json:"currency,omitempty" example:"EUR"`
+	Name     *string `json:"name,omitempty" example:"Savings Account"`
+	Currency *string `json:"currency,omitempty" example:"EUR"`
+	// Balance is kept only to detect and reject callers that still try to
+	// overwrite the derived balance. Corrections use the adjustment endpoint.
+	Balance *float64 `json:"balance,omitempty" example:"2500.00"`
+}
+
+// AdjustAccountRequest corrects an account to a real-world balance. The server
+// records the difference as a locked adjustment entry.
+type AdjustAccountRequest struct {
+	TargetBalance float64 `json:"target_balance" example:"2500.00"`
+	Description   string  `json:"description,omitempty" example:"Matched bank statement"`
 }
 
 type CreateCategoryRequest struct {
@@ -158,19 +171,32 @@ type TransactionFilters struct {
 	AccountID  *uuid.UUID `json:"account_id,omitempty"`
 	CategoryID *uuid.UUID `json:"category_id,omitempty"`
 	Type       string     `json:"type,omitempty"`
+	Kind       string     `json:"kind,omitempty"`
 	DateFrom   *time.Time `json:"date_from,omitempty"`
 	DateTo     *time.Time `json:"date_to,omitempty"`
 	Page       int        `json:"page"`
 	PageSize   int        `json:"page_size"`
 }
 
+// CurrencyTotal is one currency's balance. Currencies are never added together.
+type CurrencyTotal struct {
+	Currency string  `json:"currency"`
+	Total    float64 `json:"total"`
+}
+
+// MonthlyCurrencyTotal is one currency's income and expense for a month.
+type MonthlyCurrencyTotal struct {
+	Currency string  `json:"currency"`
+	Income   float64 `json:"income"`
+	Expense  float64 `json:"expense"`
+	Net      float64 `json:"net"`
+}
+
 type DashboardSummary struct {
-	TotalBalance       float64       `json:"total_balance"`
-	MonthlyIncome      float64       `json:"monthly_income"`
-	MonthlyExpense     float64       `json:"monthly_expense"`
-	MonthlyNet         float64       `json:"monthly_net"`
-	TransactionCount   int           `json:"transaction_count"`
-	RecentTransactions []Transaction `json:"recent_transactions"`
+	Balances           []CurrencyTotal        `json:"balances"`
+	Monthly            []MonthlyCurrencyTotal `json:"monthly"`
+	TransactionCount   int                    `json:"transaction_count"`
+	RecentTransactions []Transaction          `json:"recent_transactions"`
 }
 
 type PaginatedTransactions struct {

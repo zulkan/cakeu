@@ -19,6 +19,8 @@ const account: Account = {
   id: 'account-1',
   name: 'Everyday checking',
   balance: 1250,
+  opening_balance: 1250,
+  entry_count: 1,
   currency: 'USD',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
@@ -51,6 +53,8 @@ const transaction: Transaction = {
   created_at: '2026-10-20T00:00:00Z',
   account_name: account.name,
   category_name: expenseCategory.name,
+  kind: 'normal',
+  currency: 'USD',
 };
 
 function renderTransactions() {
@@ -212,6 +216,35 @@ describe('Transactions page', () => {
     expect(screen.getAllByText('Expense').length).toBeGreaterThan(0);
   });
 
+  it('renders opening entries as locked system rows', () => {
+    useTransactionStore.setState({
+      transactions: [
+        {
+          ...transaction,
+          id: 'opening-1',
+          category_id: '00000000-0000-0000-0000-000000000000',
+          category_name: '',
+          description: 'Opening balance',
+          type: 'income',
+          amount: 1000,
+          kind: 'opening',
+        },
+      ],
+      total: 1,
+    });
+
+    renderTransactions();
+
+    expect(screen.getAllByText('Opening balance').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('System').length).toBeGreaterThan(0);
+    expect(
+      screen.queryByRole('button', { name: /edit transaction/i })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /delete transaction/i })
+    ).not.toBeInTheDocument();
+  });
+
   it('adds a transaction through the modal with an RFC3339 date', async () => {
     const user = userEvent.setup();
     renderTransactions();
@@ -225,7 +258,7 @@ describe('Transactions page', () => {
       within(dialog).getByLabelText('Category'),
       expenseCategory.id
     );
-    await user.type(within(dialog).getByLabelText('Amount'), '42.50');
+    await user.type(within(dialog).getByLabelText(/Amount/), '42.50');
     await user.type(
       within(dialog).getByLabelText('Description'),
       'Coffee beans'
@@ -294,7 +327,7 @@ describe('Transactions page', () => {
     );
 
     const dialog = screen.getByRole('dialog');
-    expect(within(dialog).getByLabelText('Amount')).toHaveValue(42.5);
+    expect(within(dialog).getByLabelText(/Amount/)).toHaveValue(42.5);
     expect(within(dialog).getByLabelText('Date')).toHaveValue('2026-10-20');
     expect(within(dialog).getByLabelText('Category')).toHaveValue(
       expenseCategory.id
@@ -304,8 +337,8 @@ describe('Transactions page', () => {
       'Weekly groceries'
     );
 
-    await user.clear(within(dialog).getByLabelText('Amount'));
-    await user.type(within(dialog).getByLabelText('Amount'), '55.75');
+    await user.clear(within(dialog).getByLabelText(/Amount/));
+    await user.type(within(dialog).getByLabelText(/Amount/), '55.75');
     await user.click(within(dialog).getByRole('button', { name: 'Income' }));
     await user.selectOptions(
       within(dialog).getByLabelText('Category'),

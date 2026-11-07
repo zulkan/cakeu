@@ -1,5 +1,13 @@
 import { useState } from 'react';
-import { Check, Pencil, Trash2, Wallet, X } from 'lucide-react';
+import {
+  Check,
+  Lock,
+  Pencil,
+  SlidersHorizontal,
+  Trash2,
+  Wallet,
+  X,
+} from 'lucide-react';
 import type { Account, UpdateAccountRequest } from '../../types';
 import { formatCurrency, formatDate } from '../../lib/format';
 import { Card } from '../ui/Card';
@@ -9,19 +17,23 @@ import { errorClass, inputClass, labelClass } from '../ui/formStyles';
 interface AccountCardProps {
   account: Account;
   onUpdate: (id: string, data: UpdateAccountRequest) => Promise<void>;
+  onAdjust: (account: Account) => void;
   onDelete: (account: Account) => void;
 }
 
-export function AccountCard({ account, onUpdate, onDelete }: AccountCardProps) {
+export function AccountCard({
+  account,
+  onUpdate,
+  onAdjust,
+  onDelete,
+}: AccountCardProps) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(account.name);
-  const [balance, setBalance] = useState(String(account.balance));
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const startEditing = () => {
     setName(account.name);
-    setBalance(String(account.balance));
     setError(null);
     setEditing(true);
   };
@@ -33,15 +45,9 @@ export function AccountCard({ account, onUpdate, onDelete }: AccountCardProps) {
 
   const save = async () => {
     const trimmedName = name.trim();
-    const numericBalance = Number(balance);
 
     if (!trimmedName) {
       setError('Account name is required');
-      return;
-    }
-
-    if (!Number.isFinite(numericBalance) || numericBalance < 0) {
-      setError('Enter a valid balance');
       return;
     }
 
@@ -49,10 +55,7 @@ export function AccountCard({ account, onUpdate, onDelete }: AccountCardProps) {
     setError(null);
 
     try {
-      await onUpdate(account.id, {
-        name: trimmedName,
-        balance: numericBalance,
-      });
+      await onUpdate(account.id, { name: trimmedName });
       setEditing(false);
     } catch (updateError) {
       setError(
@@ -81,8 +84,18 @@ export function AccountCard({ account, onUpdate, onDelete }: AccountCardProps) {
             </p>
           </div>
         </div>
-        <span className="rounded-full bg-warm-100 px-2.5 py-1 text-xs font-bold text-warm-800">
+        <span
+          className="inline-flex items-center gap-1 rounded-full bg-warm-100 px-2.5 py-1 text-xs font-bold text-warm-800"
+          title={
+            account.entry_count > 0
+              ? 'Currency is locked after the first entry'
+              : undefined
+          }
+        >
           {account.currency}
+          {account.entry_count > 0 && (
+            <Lock className="h-3 w-3" aria-hidden="true" />
+          )}
         </span>
       </div>
 
@@ -97,23 +110,6 @@ export function AccountCard({ account, onUpdate, onDelete }: AccountCardProps) {
               type="text"
               value={name}
               onChange={(event) => setName(event.target.value)}
-              className={inputClass}
-            />
-          </div>
-          <div className="space-y-1">
-            <label
-              htmlFor={`account-balance-${account.id}`}
-              className={labelClass}
-            >
-              Balance
-            </label>
-            <input
-              id={`account-balance-${account.id}`}
-              type="number"
-              min="0"
-              step="0.01"
-              value={balance}
-              onChange={(event) => setBalance(event.target.value)}
               className={inputClass}
             />
           </div>
@@ -140,11 +136,22 @@ export function AccountCard({ account, onUpdate, onDelete }: AccountCardProps) {
             {formatCurrency(account.balance, account.currency)}
           </p>
           <p className="mt-1 text-xs text-stone-400">Current balance</p>
+          <p className="mt-1 text-xs text-stone-400">
+            Opened with {formatCurrency(account.opening_balance, account.currency)}
+          </p>
 
-          <div className="mt-5 flex gap-2 border-t border-warm-100 pt-4">
+          <div className="mt-5 flex flex-wrap gap-2 border-t border-warm-100 pt-4">
             <Button size="sm" variant="secondary" onClick={startEditing}>
               <Pencil className="h-4 w-4" aria-hidden="true" />
               Edit
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => onAdjust(account)}
+            >
+              <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
+              Adjust balance
             </Button>
             <Button
               size="sm"

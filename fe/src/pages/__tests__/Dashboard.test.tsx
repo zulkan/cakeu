@@ -19,6 +19,8 @@ const account: Account = {
   id: 'account-1',
   name: 'Everyday checking',
   balance: 1250,
+  opening_balance: 1250,
+  entry_count: 1,
   currency: 'USD',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
@@ -43,13 +45,13 @@ const transaction: Transaction = {
   created_at: '2026-10-20T00:00:00Z',
   account_name: account.name,
   category_name: category.name,
+  kind: 'normal',
+  currency: 'USD',
 };
 
 const summary: DashboardSummary = {
-  total_balance: 1250,
-  monthly_income: 3000,
-  monthly_expense: 1750,
-  monthly_net: 1250,
+  balances: [{ currency: 'USD', total: 1250 }],
+  monthly: [{ currency: 'USD', income: 3000, expense: 1750, net: 1250 }],
   transaction_count: 4,
   recent_transactions: [transaction],
 };
@@ -122,13 +124,44 @@ describe('Dashboard page', () => {
     expect(screen.getByText('−$42.50')).toBeInTheDocument();
   });
 
+  it('renders one balance and monthly row per currency', () => {
+    useDashboardStore.setState({
+      summary: {
+        balances: [
+          { currency: 'USD', total: 1250 },
+          { currency: 'IDR', total: 5000000 },
+        ],
+        monthly: [
+          { currency: 'USD', income: 3000, expense: 1750, net: 1250 },
+          { currency: 'IDR', income: 10000000, expense: 4000000, net: 6000000 },
+        ],
+        transaction_count: 7,
+        recent_transactions: [transaction],
+      },
+    });
+    useAccountStore.setState({
+      accounts: [
+        account,
+        { ...account, id: 'account-2', currency: 'IDR', balance: 5000000 },
+      ],
+    });
+    useCategoryStore.setState({ categories: [category] });
+
+    renderDashboard();
+
+    expect(screen.getAllByText(/IDR/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/USD/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Income').length).toBeGreaterThan(1);
+    expect(screen.getByText('Transactions')).toBeInTheDocument();
+    expect(screen.getByText('7')).toBeInTheDocument();
+    expect(screen.queryByText('Monthly income')).not.toBeInTheDocument();
+  });
+
   it('shows the setup checklist and empty transaction state when nothing exists', () => {
     useDashboardStore.setState({
       summary: {
-        total_balance: 0,
-        monthly_income: 0,
-        monthly_expense: 0,
-        monthly_net: 0,
+        balances: [],
+        monthly: [],
         transaction_count: 0,
         recent_transactions: [],
       },

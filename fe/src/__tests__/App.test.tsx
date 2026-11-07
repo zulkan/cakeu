@@ -13,6 +13,8 @@ const account: Account = {
   id: 'account-1',
   name: 'Everyday checking',
   balance: 1250,
+  opening_balance: 1250,
+  entry_count: 1,
   currency: 'USD',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
@@ -27,10 +29,8 @@ const category: Category = {
 };
 
 const summary: DashboardSummary = {
-  total_balance: 1250,
-  monthly_income: 3000,
-  monthly_expense: 1750,
-  monthly_net: 1250,
+  balances: [{ currency: 'USD', total: 1250 }],
+  monthly: [{ currency: 'USD', income: 3000, expense: 1750, net: 1250 }],
   transaction_count: 4,
   recent_transactions: [],
 };

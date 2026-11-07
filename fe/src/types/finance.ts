@@ -2,6 +2,8 @@ export interface Account {
   id: string;
   name: string;
   balance: number;
+  opening_balance: number;
+  entry_count: number;
   currency: string;
   created_at: string;
   updated_at: string;
@@ -15,6 +17,8 @@ export interface Category {
   created_at: string;
 }
 
+export type TransactionKind = 'normal' | 'opening' | 'adjustment';
+
 export interface Transaction {
   id: string;
   account_id: string;
@@ -26,13 +30,25 @@ export interface Transaction {
   created_at: string;
   account_name: string;
   category_name: string;
+  kind: TransactionKind;
+  currency: string;
+}
+
+export interface CurrencyTotal {
+  currency: string;
+  total: number;
+}
+
+export interface MonthlyCurrencyTotal {
+  currency: string;
+  income: number;
+  expense: number;
+  net: number;
 }
 
 export interface DashboardSummary {
-  total_balance: number;
-  monthly_income: number;
-  monthly_expense: number;
-  monthly_net: number;
+  balances: CurrencyTotal[];
+  monthly: MonthlyCurrencyTotal[];
   transaction_count: number;
   recent_transactions: Transaction[];
 }
@@ -56,14 +72,18 @@ export interface TransactionFilters {
 
 export interface CreateAccountRequest {
   name: string;
-  balance?: number;
+  opening_balance?: number;
   currency?: string;
 }
 
 export interface UpdateAccountRequest {
   name?: string;
-  balance?: number;
   currency?: string;
+}
+
+export interface AdjustAccountRequest {
+  target_balance: number;
+  description?: string;
 }
 
 export interface CreateCategoryRequest {

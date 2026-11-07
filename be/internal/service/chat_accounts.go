@@ -55,18 +55,18 @@ func (s *ChatService) findCategory(ctx context.Context, userID uuid.UUID, name, 
 
 func (s *ChatService) createAccount(ctx context.Context, userID uuid.UUID, rawArgs string) (string, string, *model.ChatPendingAction, error) {
 	var args struct {
-		Name     string  `json:"name"`
-		Balance  float64 `json:"balance"`
-		Currency string  `json:"currency"`
+		Name           string  `json:"name"`
+		OpeningBalance float64 `json:"opening_balance"`
+		Currency       string  `json:"currency"`
 	}
 	if err := decodeArgs(rawArgs, &args); err != nil {
 		return "", "", nil, err
 	}
 
 	account, err := s.accounts.CreateAccount(ctx, userID, model.CreateAccountRequest{
-		Name:     args.Name,
-		Balance:  args.Balance,
-		Currency: args.Currency,
+		Name:           args.Name,
+		OpeningBalance: args.OpeningBalance,
+		Currency:       args.Currency,
 	})
 	if err != nil {
 		return "", "", nil, err
@@ -119,10 +119,9 @@ func (s *ChatService) createCategory(ctx context.Context, userID uuid.UUID, rawA
 
 func (s *ChatService) updateAccount(ctx context.Context, userID uuid.UUID, rawArgs string) (string, string, *model.ChatPendingAction, error) {
 	var args struct {
-		Account  string   `json:"account"`
-		Name     *string  `json:"name"`
-		Balance  *float64 `json:"balance"`
-		Currency *string  `json:"currency"`
+		Account  string  `json:"account"`
+		Name     *string `json:"name"`
+		Currency *string `json:"currency"`
 	}
 	if err := decodeArgs(rawArgs, &args); err != nil {
 		return "", "", nil, err
@@ -135,7 +134,6 @@ func (s *ChatService) updateAccount(ctx context.Context, userID uuid.UUID, rawAr
 
 	account, err := s.accounts.UpdateAccount(ctx, userID, target.ID, model.UpdateAccountRequest{
 		Name:     args.Name,
-		Balance:  args.Balance,
 		Currency: args.Currency,
 	})
 	if err != nil {
@@ -153,6 +151,42 @@ func (s *ChatService) updateAccount(ctx context.Context, userID uuid.UUID, rawAr
 	}
 
 	return string(encoded), fmt.Sprintf("Updated account %q", account.Name), nil, nil
+}
+
+func (s *ChatService) adjustAccountBalance(ctx context.Context, userID uuid.UUID, rawArgs string) (string, string, *model.ChatPendingAction, error) {
+	var args struct {
+		Account       string  `json:"account"`
+		TargetBalance float64 `json:"target_balance"`
+		Description   string  `json:"description"`
+	}
+	if err := decodeArgs(rawArgs, &args); err != nil {
+		return "", "", nil, err
+	}
+
+	target, err := s.findAccount(ctx, userID, args.Account)
+	if err != nil {
+		return "", "", nil, err
+	}
+
+	account, err := s.accounts.AdjustAccountBalance(ctx, userID, target.ID, model.AdjustAccountRequest{
+		TargetBalance: args.TargetBalance,
+		Description:   args.Description,
+	})
+	if err != nil {
+		return "", "", nil, err
+	}
+
+	encoded, err := json.Marshal(map[string]any{
+		"id":       account.ID.String(),
+		"name":     account.Name,
+		"balance":  account.Balance,
+		"currency": account.Currency,
+	})
+	if err != nil {
+		return "", "", nil, fmt.Errorf("encode account: %w", err)
+	}
+
+	return string(encoded), fmt.Sprintf("Adjusted account %q to %.2f", account.Name, account.Balance), nil, nil
 }
 
 func (s *ChatService) requestDeleteAccount(ctx context.Context, userID uuid.UUID, rawArgs string) (string, string, *model.ChatPendingAction, error) {

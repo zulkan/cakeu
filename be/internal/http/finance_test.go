@@ -33,6 +33,7 @@ type fakeAccountService struct {
 	lastID     uuid.UUID
 	lastCreate model.CreateAccountRequest
 	lastUpdate model.UpdateAccountRequest
+	lastAdjust model.AdjustAccountRequest
 }
 
 func (f *fakeAccountService) CreateAccount(ctx context.Context, userID uuid.UUID, req model.CreateAccountRequest) (*model.Account, error) {
@@ -44,7 +45,27 @@ func (f *fakeAccountService) CreateAccount(ctx context.Context, userID uuid.UUID
 	if f.account != nil {
 		return f.account, nil
 	}
-	return &model.Account{ID: uuid.New(), UserID: userID, Name: req.Name, Balance: req.Balance, Currency: req.Currency}, nil
+	return &model.Account{
+		ID:             uuid.New(),
+		UserID:         userID,
+		Name:           req.Name,
+		Balance:        req.OpeningBalance,
+		OpeningBalance: req.OpeningBalance,
+		Currency:       req.Currency,
+	}, nil
+}
+
+func (f *fakeAccountService) AdjustAccountBalance(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.AdjustAccountRequest) (*model.Account, error) {
+	f.lastUserID = userID
+	f.lastID = id
+	f.lastAdjust = req
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.account != nil {
+		return f.account, nil
+	}
+	return &model.Account{ID: id, UserID: userID, Balance: req.TargetBalance}, nil
 }
 
 func (f *fakeAccountService) GetAccount(ctx context.Context, id uuid.UUID) (*model.Account, error) {
@@ -409,7 +430,7 @@ func TestCreateAccount(t *testing.T) {
 	handler := newTestHandler(accounts, &fakeCategoryService{}, &fakeTransactionService{}, nil)
 
 	recorder := doRequest(t, handler, http.MethodPost, "/api/accounts", signToken(t, testJWTSecret, userID),
-		`{"name":"Checking","balance":100,"currency":"USD"}`)
+		`{"name":"Checking","opening_balance":100,"currency":"USD"}`)
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("expected status 201, got %d with body %q", recorder.Code, recorder.Body.String())
 	}
@@ -442,6 +463,64 @@ func TestUpdateAccount(t *testing.T) {
 	}
 	if accounts.lastUpdate.Name == nil || *accounts.lastUpdate.Name != "Updated" {
 		t.Fatalf("expected name %q, got %v", "Updated", accounts.lastUpdate.Name)
+	}
+}
+
+func TestUpdateAccountRejectsBalanceField(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	accountID := uuid.New()
+	accounts := &fakeAccountService{}
+	handler := newTestHandler(accounts, &fakeCategoryService{}, &fakeTransactionService{}, nil)
+
+	recorder := doRequest(t, handler, http.MethodPatch, "/api/accounts/"+accountID.String(), signToken(t, testJWTSecret, userID),
+		`{"balance":2500}`)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "adjustment") {
+		t.Fatalf("expected adjustment guidance, got %q", recorder.Body.String())
+	}
+}
+
+func TestCreateAccountRejectsBalanceField(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	accounts := &fakeAccountService{}
+	handler := newTestHandler(accounts, &fakeCategoryService{}, &fakeTransactionService{}, nil)
+
+	recorder := doRequest(t, handler, http.MethodPost, "/api/accounts", signToken(t, testJWTSecret, userID),
+		`{"name":"Checking","balance":100}`)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAdjustAccountBalance(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	accountID := uuid.New()
+	accounts := &fakeAccountService{
+		account: &model.Account{ID: accountID, UserID: userID, Balance: 950},
+	}
+	handler := newTestHandler(accounts, &fakeCategoryService{}, &fakeTransactionService{}, nil)
+
+	recorder := doRequest(t, handler, http.MethodPost, "/api/accounts/"+accountID.String()+"/adjustments", signToken(t, testJWTSecret, userID),
+		`{"target_balance":950,"description":"Bank statement"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+	if accounts.lastID != accountID {
+		t.Fatalf("expected account id %s, got %s", accountID, accounts.lastID)
+	}
+	if accounts.lastUserID != userID {
+		t.Fatalf("expected caller %s forwarded, got %s", userID, accounts.lastUserID)
+	}
+	if accounts.lastAdjust.TargetBalance != 950 || accounts.lastAdjust.Description != "Bank statement" {
+		t.Fatalf("unexpected adjustment request: %+v", accounts.lastAdjust)
 	}
 }
 
@@ -900,10 +979,12 @@ func TestDashboardSummary(t *testing.T) {
 
 	userID := uuid.New()
 	transactions := &fakeTransactionService{summary: &model.DashboardSummary{
-		TotalBalance:       300.5,
-		MonthlyIncome:      1000,
-		MonthlyExpense:     250,
-		MonthlyNet:         750,
+		Balances: []model.CurrencyTotal{
+			{Currency: "USD", Total: 300.5},
+		},
+		Monthly: []model.MonthlyCurrencyTotal{
+			{Currency: "USD", Income: 1000, Expense: 250, Net: 750},
+		},
 		TransactionCount:   42,
 		RecentTransactions: []model.Transaction{{ID: uuid.New()}},
 	}}
@@ -918,11 +999,11 @@ func TestDashboardSummary(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("expected JSON response, got error: %v", err)
 	}
-	if response.TotalBalance != 300.5 {
-		t.Fatalf("expected total balance 300.5, got %v", response.TotalBalance)
+	if len(response.Balances) != 1 || response.Balances[0].Total != 300.5 {
+		t.Fatalf("expected USD balance 300.5, got %+v", response.Balances)
 	}
-	if response.MonthlyNet != 750 {
-		t.Fatalf("expected monthly net 750, got %v", response.MonthlyNet)
+	if len(response.Monthly) != 1 || response.Monthly[0].Net != 750 {
+		t.Fatalf("expected monthly net 750, got %+v", response.Monthly)
 	}
 	if response.TransactionCount != 42 {
 		t.Fatalf("expected transaction count 42, got %d", response.TransactionCount)
@@ -947,6 +1028,10 @@ func TestServiceErrorsMapToHTTPStatus(t *testing.T) {
 		{"category name exists", service.ErrCategoryNameExists, http.StatusConflict},
 		{"invalid amount", service.ErrInvalidAmount, http.StatusBadRequest},
 		{"invalid type", service.ErrInvalidType, http.StatusBadRequest},
+		{"invalid balance", service.ErrInvalidBalance, http.StatusBadRequest},
+		{"use adjustment", service.ErrUseAdjustmentEndpoint, http.StatusBadRequest},
+		{"currency locked", service.ErrCurrencyLocked, http.StatusConflict},
+		{"system entry", service.ErrSystemEntryImmutable, http.StatusConflict},
 		{"invalid name", service.ErrInvalidName, http.StatusBadRequest},
 		{"invalid currency", service.ErrInvalidCurrency, http.StatusBadRequest},
 		{"internal error", io.ErrUnexpectedEOF, http.StatusInternalServerError},

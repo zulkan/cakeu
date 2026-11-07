@@ -62,6 +62,7 @@ func NewHandler(health HealthChecker, auth AuthService, accounts AccountService,
 	apiMux.HandleFunc("GET /api/accounts", handleListAccounts(accounts))
 	apiMux.HandleFunc("POST /api/accounts", handleCreateAccount(accounts))
 	apiMux.HandleFunc("PATCH /api/accounts/{id}", handleUpdateAccount(accounts))
+	apiMux.HandleFunc("POST /api/accounts/{id}/adjustments", handleAdjustAccountBalance(accounts))
 	apiMux.HandleFunc("DELETE /api/accounts/{id}", handleDeleteAccount(accounts))
 
 	apiMux.HandleFunc("GET /api/categories", handleListCategories(categories))

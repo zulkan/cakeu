@@ -251,7 +251,6 @@ function Transactions() {
           <TransactionList
             transactions={transactions}
             categories={categories}
-            currency={currency}
             onEdit={setEditTarget}
             onDelete={(transaction) => {
               setDeleteError(null);
