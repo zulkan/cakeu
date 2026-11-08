@@ -5,6 +5,7 @@
 
 # Backend runtime artifacts
 be/logs/
+be/data/
 *.log
 
 # Frontend dependencies and build output

@@ -15,7 +15,7 @@ go vet ./...
 go run ./cmd/resetpassword -email user@example.com   # set a password directly; prompts on stdin
 ```
 
-No Makefile, CI, or Go lint config — `gofmt` is the only formatting rule.
+No Makefile or Go lint config — `gofmt` is the only formatting rule. CI: `.github/workflows/ci.yml` runs gofmt/vet/build/test for the backend and npm lint/vitest/build for the frontend.
 
 ```bash
 cd fe
@@ -30,7 +30,10 @@ npm run build                                          # tsc -b && vite build
 
 - `be/cmd/server/main.go` is the only entrypoint: godotenv → config → slog logger → pgx pool → **auto-runs migrations** → services → handler → graceful shutdown. A running Postgres with `uuid-ossp` available is required just to boot.
 - Run the binary from `be/`: `.env`, `internal/migrations` (`file://internal/migrations`) and `logs/` are resolved relative to cwd. `be/logs/app.log` is append-only JSON; logs also go to stderr.
-- Routes are plain `http.ServeMux` in `be/internal/http/server.go`: public `POST /api/auth/register`, `/api/auth/login`, `/api/auth/forgot-password`, `/api/auth/reset-password`, plus `/health` and `/swagger/`. Everything else under `/api/` (accounts, categories, transactions, dashboard, CSV export/import, chat) is wrapped in `JWTAuth`; `CORS(allowedOrigins)` wraps the whole mux. Auth lives under `/api/auth/*` rather than at the root because the Vite dev proxy would otherwise swallow the SPA's `/login` and `/reset-password` page routes on direct navigation.
+- Routes are plain `http.ServeMux` in `be/internal/http/server.go`: public `POST /api/auth/register`, `/api/auth/login`, `/api/auth/forgot-password`, `/api/auth/reset-password`, plus `/health` and `/swagger/`; `POST /api/auth/change-password` is the only `/api/auth/*` route behind `JWTAuth`. Everything else under `/api/` (accounts, categories, transactions, dashboard, CSV export/import, chat) is wrapped in `JWTAuth`; `CORS(allowedOrigins)` wraps the whole mux. Auth lives under `/api/auth/*` rather than at the root because the Vite dev proxy would otherwise swallow the SPA's `/login` and `/reset-password` page routes on direct navigation.
+- Auth hardening: login is rate limited to 10 attempts per 15 minutes per IP+email; registration, reset-password and change-password enforce 8–72 byte passwords; `JWT_SECRET` is required at startup — empty or the old placeholder value aborts startup, and a secret shorter than 32 characters logs a warning.
+- Categories: `PATCH /api/categories/{id}` updates only `name` and `color` (sending `type` returns 400); `DELETE /api/categories/{id}` returns 409 when transactions still reference the category instead of cascading.
+- Migration 006 adds a `(user_id, date)` index on `transactions`.
 - Accounts are ledger-backed (migration 005): `transactions.kind` is `normal|opening|adjustment`; `accounts.balance` no longer exists in the DB and every account read derives `balance`, `opening_balance` and `entry_count` from the ledger. `POST /api/accounts` takes `opening_balance` (negative allowed for credit cards); `PATCH /api/accounts/{id}` accepts only name/currency (a `balance` field returns 400) and currency is locked once `entry_count > 0`; `POST /api/accounts/{id}/adjustments` records a locked adjustment entry. Opening/adjustment entries are visible in history but excluded from reports, budgets, dashboard monthly totals/recent list, and CSV export.
 - Dashboard: `GET /api/dashboard/summary` returns `balances` and `monthly` arrays with one row per currency — different currencies are never added together. `transaction_count` is the current month's normal entries, and recent transactions carry their own account currency.
 - CSV: `GET /api/transactions/export.csv` streams `date,type,amount,description,account,category`; `POST /api/transactions/import/preview` validates without writing; `POST /api/transactions/import` requires `confirm=true` and commits all valid rows in one DB transaction. Uploads accept `.csv`, `.xlsx` and legacy `.xls` (parsed by `internal/spreadsheet`), are capped at 5 MB / 5000 rows per sheet, and take an optional `sheet` form field; the response echoes `sheet` and lists `sheets`. Unknown account or category names are errors rather than being created silently.
@@ -59,12 +62,10 @@ npm run build                                          # tsc -b && vite build
 
 ## Repo state
 
-- No `.gitignore`: `be/logs/`, `fe/node_modules/`, `fe/dist/`, and `.omo/` are on disk and untracked. Never `git add -A` / `git add .`; stage explicit paths.
+- `.gitignore` exists: `.env`/`*.env` (except `*.env.example`), `be/logs/`, `fe/node_modules/`, `fe/dist/`, and `.omo/` are ignored. Never `git add -A` / `git add .`; stage explicit paths.
 
 ## Known gaps (don't assume these work)
 
-- `isDuplicateEmail` returns true for any error, so any DB failure during registration surfaces as `409 email already registered`.
 - Password-reset email delivery needs a Sumopod-verified sender domain. `SMTP_FROM=admin@zulkan.my.id` and all three DNS records are published (`v=DKIM1` at `trx_ke._domainkey`, root SPF including `spf.kirim.email`, and `sumo-verification=…`), yet Sumopod still answers `450 Relay failed: Custom sender domain ownership not verified` until the domain is marked Verified in Email SMTP → Custom Domain (click "Verify DNS settings"). Until then no reset email is delivered; blank the SMTP user/password to make the backend log the reset link at WARN instead — pull it from `be/logs/app.log` to test locally.
 - `ForgotPassword` rate limiting is in-memory and per-process, so it does not hold across multiple instances.
 - Reports (cashflow/categories/merchants) and budgets still aggregate different currencies together; only the dashboard and transaction display are per-currency.
-- `go test ./...` in `be/` has one pre-existing failure: `TestNewServerSetsSecurityTimeouts` expects a 10s read/write timeout while `newServer` uses 60s read and 300s write. It is unrelated to the ledger changes.
