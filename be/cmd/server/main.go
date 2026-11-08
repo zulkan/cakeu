@@ -108,7 +108,8 @@ func main() {
 		cfg.LLMMaxTokens,
 		time.Duration(cfg.LLMTimeoutSeconds)*time.Second,
 	)
-	chatService := service.NewChatService(accountService, categoryService, transactionService, budgetService, recurringService, reportService, llmClient, logger)
+	chatHistoryRepo := db.NewChatHistoryRepo(dbClient.Pool())
+	chatService := service.NewChatService(accountService, categoryService, transactionService, budgetService, recurringService, reportService, chatHistoryRepo, llmClient, logger)
 
 	importService := service.NewImportService(
 		llmClient,

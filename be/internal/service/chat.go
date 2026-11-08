@@ -21,9 +21,12 @@ var (
 	ErrLLMNotConfigured      = errors.New("chat is not configured")
 	ErrChatTooManySteps      = errors.New("chat exceeded the tool iteration limit")
 	ErrPendingActionNotFound = errors.New("pending action not found")
+	ErrChatTokenLimitReached = errors.New("chat token limit reached; clear the chat to continue")
+	ErrChatMessageRequired   = errors.New("content is required")
 )
 
 const (
+	chatTokenLimit           = 50_000
 	maxChatIterations        = 5
 	pendingActionTTL         = 5 * time.Minute
 	maxToolResultRows        = 100
@@ -52,6 +55,13 @@ type pendingAction struct {
 	expiresAt time.Time
 }
 
+type ChatHistoryRepository interface {
+	ListMessages(ctx context.Context, userID uuid.UUID) ([]model.ChatHistoryMessage, error)
+	AppendMessages(ctx context.Context, userID uuid.UUID, messages []model.NewChatMessage) error
+	Clear(ctx context.Context, userID uuid.UUID) error
+	TokenTotal(ctx context.Context, userID uuid.UUID) (int, error)
+}
+
 type ChatService struct {
 	accounts     AccountService
 	categories   CategoryService
@@ -59,6 +69,7 @@ type ChatService struct {
 	budgets      BudgetService
 	recurring    RecurringService
 	reports      ReportService
+	history      ChatHistoryRepository
 	client       llm.Client
 	logger       *slog.Logger
 
@@ -67,7 +78,7 @@ type ChatService struct {
 	files   map[string]storedChatFile
 }
 
-func NewChatService(accounts AccountService, categories CategoryService, transactions TransactionService, budgets BudgetService, recurring RecurringService, reports ReportService, client llm.Client, logger *slog.Logger) *ChatService {
+func NewChatService(accounts AccountService, categories CategoryService, transactions TransactionService, budgets BudgetService, recurring RecurringService, reports ReportService, history ChatHistoryRepository, client llm.Client, logger *slog.Logger) *ChatService {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -79,6 +90,7 @@ func NewChatService(accounts AccountService, categories CategoryService, transac
 		budgets:      budgets,
 		recurring:    recurring,
 		reports:      reports,
+		history:      history,
 		client:       client,
 		logger:       logger,
 		pending:      make(map[string]pendingAction),
@@ -87,6 +99,24 @@ func NewChatService(accounts AccountService, categories CategoryService, transac
 }
 
 func (s *ChatService) Handle(ctx context.Context, userID uuid.UUID, req model.ChatRequest) (*model.ChatResponse, error) {
+	content := strings.TrimSpace(req.Content)
+	if content == "" {
+		return nil, ErrChatMessageRequired
+	}
+
+	used, err := s.history.TokenTotal(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("read chat token total: %w", err)
+	}
+	if used >= chatTokenLimit {
+		return nil, ErrChatTokenLimitReached
+	}
+
+	stored, err := s.history.ListMessages(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("read chat history: %w", err)
+	}
+
 	messages := []llm.Message{{Role: "system", Content: chatSystemPromptText}}
 
 	fileID := strings.TrimSpace(req.FileID)
@@ -104,7 +134,7 @@ func (s *ChatService) Handle(ctx context.Context, userID uuid.UUID, req model.Ch
 		messages = append(messages, llm.Message{Role: "system", Content: context})
 	}
 
-	for _, message := range req.Messages {
+	for _, message := range stored {
 		if message.Role != "user" && message.Role != "assistant" {
 			continue
 		}
@@ -114,9 +144,7 @@ func (s *ChatService) Handle(ctx context.Context, userID uuid.UUID, req model.Ch
 		messages = append(messages, llm.Message{Role: message.Role, Content: message.Content})
 	}
 
-	if len(messages) == 1 {
-		return nil, errors.New("messages are required")
-	}
+	messages = append(messages, llm.Message{Role: "user", Content: content})
 
 	response := &model.ChatResponse{ToolCalls: []model.ChatToolCall{}}
 
@@ -136,7 +164,7 @@ func (s *ChatService) Handle(ctx context.Context, userID uuid.UUID, req model.Ch
 			if response.Reply == "" {
 				response.Reply = "I could not produce an answer."
 			}
-			return response, nil
+			return s.finishTurn(ctx, userID, content, used, response)
 		}
 
 		for _, call := range reply.ToolCalls {
@@ -151,7 +179,7 @@ func (s *ChatService) Handle(ctx context.Context, userID uuid.UUID, req model.Ch
 				response.PendingAction = pending
 				response.ToolCalls = append(response.ToolCalls, model.ChatToolCall{Name: call.Function.Name, Summary: summary})
 				response.Reply = summary
-				return response, nil
+				return s.finishTurn(ctx, userID, content, used, response)
 			}
 
 			response.ToolCalls = append(response.ToolCalls, model.ChatToolCall{Name: call.Function.Name, Summary: summary})
@@ -162,10 +190,69 @@ func (s *ChatService) Handle(ctx context.Context, userID uuid.UUID, req model.Ch
 	return nil, ErrChatTooManySteps
 }
 
-func (s *ChatService) Confirm(ctx context.Context, userID uuid.UUID, id string) (string, error) {
+func (s *ChatService) finishTurn(ctx context.Context, userID uuid.UUID, content string, used int, response *model.ChatResponse) (*model.ChatResponse, error) {
+	userTokens := estimateChatTokens(content)
+	assistantTokens := estimateChatTokens(response.Reply)
+
+	if err := s.history.AppendMessages(ctx, userID, []model.NewChatMessage{
+		{Role: "user", Content: content, TokenCount: userTokens},
+		{Role: "assistant", Content: response.Reply, TokenCount: assistantTokens},
+	}); err != nil {
+		return nil, fmt.Errorf("save chat turn: %w", err)
+	}
+
+	usage := chatTokenUsage(used + userTokens + assistantTokens)
+	response.TokenUsage = &usage
+
+	return response, nil
+}
+
+func (s *ChatService) History(ctx context.Context, userID uuid.UUID) (*model.ChatHistoryResponse, error) {
+	messages, err := s.history.ListMessages(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("read chat history: %w", err)
+	}
+	if messages == nil {
+		messages = []model.ChatHistoryMessage{}
+	}
+
+	used, err := s.history.TokenTotal(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("read chat token total: %w", err)
+	}
+
+	return &model.ChatHistoryResponse{
+		Messages:   messages,
+		TokenUsage: chatTokenUsage(used),
+	}, nil
+}
+
+func (s *ChatService) Clear(ctx context.Context, userID uuid.UUID) error {
+	if err := s.history.Clear(ctx, userID); err != nil {
+		return fmt.Errorf("clear chat history: %w", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for id, action := range s.pending {
+		if action.userID == userID {
+			delete(s.pending, id)
+		}
+	}
+	for id, file := range s.files {
+		if file.userID == userID {
+			delete(s.files, id)
+		}
+	}
+
+	return nil
+}
+
+func (s *ChatService) Confirm(ctx context.Context, userID uuid.UUID, id string) (*model.ChatResponse, error) {
 	action, ok := s.takePending(userID, id)
 	if !ok {
-		return "", ErrPendingActionNotFound
+		return nil, ErrPendingActionNotFound
 	}
 
 	var err error
@@ -179,22 +266,32 @@ func (s *ChatService) Confirm(ctx context.Context, userID uuid.UUID, id string) 
 	case pendingImportFile:
 		file, ok := s.lookupFile(userID, action.fileID)
 		if !ok {
-			return "", ErrPendingActionNotFound
+			return nil, ErrPendingActionNotFound
 		}
 		selected, ok := file.pick(action.sheet)
 		if !ok {
-			return "", ErrPendingActionNotFound
+			return nil, ErrPendingActionNotFound
 		}
 		_, err = s.transactions.ImportTransactions(ctx, userID, strings.NewReader(selected.csv), false)
 	default:
-		return "", ErrPendingActionNotFound
+		return nil, ErrPendingActionNotFound
 	}
 
 	if err != nil {
-		return "", fmt.Errorf("confirm action: %w", err)
+		return nil, fmt.Errorf("confirm action: %w", err)
 	}
 
-	return action.summary, nil
+	used, err := s.history.TokenTotal(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("read chat token total: %w", err)
+	}
+
+	usage := chatTokenUsage(used)
+	return &model.ChatResponse{
+		Reply:      action.summary,
+		ToolCalls:  []model.ChatToolCall{},
+		TokenUsage: &usage,
+	}, nil
 }
 
 func (s *ChatService) Cancel(userID uuid.UUID, id string) error {

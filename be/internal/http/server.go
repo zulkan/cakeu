@@ -55,11 +55,12 @@ func NewHandler(health HealthChecker, auth AuthService, accounts AccountService,
 	// Auth endpoints
 	authLimiter := newRateLimiter(5, 15*time.Minute)
 	loginLimiter := newRateLimiter(10, 15*time.Minute)
+	changePasswordLimiter := newRateLimiter(5, 15*time.Minute)
 	mux.HandleFunc("POST /api/auth/register", handleRegister(auth))
 	mux.HandleFunc("POST /api/auth/login", loginLimiter.wrap(handleLogin(auth)))
 	mux.HandleFunc("POST /api/auth/forgot-password", authLimiter.wrap(handleForgotPassword(auth)))
 	mux.HandleFunc("POST /api/auth/reset-password", handleResetPassword(auth))
-	mux.Handle("POST /api/auth/change-password", JWTAuth(jwtSecret)(http.HandlerFunc(handleChangePassword(auth))))
+	mux.Handle("POST /api/auth/change-password", JWTAuth(jwtSecret)(http.HandlerFunc(handleChangePassword(auth, changePasswordLimiter))))
 
 	// Finance API endpoints (JWT protected)
 	apiMux := http.NewServeMux()
@@ -113,6 +114,8 @@ func NewHandler(health HealthChecker, auth AuthService, accounts AccountService,
 	chatLimiter := newRateLimiter(20, time.Minute)
 	apiMux.HandleFunc("POST /api/chat", handleChat(chat, chatLimiter))
 	apiMux.HandleFunc("POST /api/chat/files", handleChatFileUpload(chat, chatLimiter))
+	apiMux.HandleFunc("GET /api/chat/history", handleChatHistory(chat))
+	apiMux.HandleFunc("DELETE /api/chat/history", handleChatClear(chat))
 	apiMux.HandleFunc("POST /api/chat/actions/{id}/confirm", handleChatConfirm(chat))
 	apiMux.HandleFunc("POST /api/chat/actions/{id}/cancel", handleChatCancel(chat))
 
@@ -311,11 +314,16 @@ func handleResetPassword(auth AuthService) http.HandlerFunc {
 // @Failure 400 {object} model.ErrorResponse
 // @Failure 401 {object} model.ErrorResponse
 // @Router /api/auth/change-password [post]
-func handleChangePassword(auth AuthService) http.HandlerFunc {
+func handleChangePassword(auth AuthService, limiter *rateLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID, err := userIDFromContext(r.Context())
 		if err != nil {
 			respondError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		if limiter != nil && !limiter.allow("change-password|"+userID.String()) {
+			respondError(w, http.StatusTooManyRequests, "too many requests")
 			return
 		}
 

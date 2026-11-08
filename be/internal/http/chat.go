@@ -18,9 +18,11 @@ const maxChatBodyBytes = 64 << 10
 
 type ChatService interface {
 	Handle(ctx context.Context, userID uuid.UUID, req model.ChatRequest) (*model.ChatResponse, error)
-	Confirm(ctx context.Context, userID uuid.UUID, id string) (string, error)
+	Confirm(ctx context.Context, userID uuid.UUID, id string) (*model.ChatResponse, error)
 	Cancel(userID uuid.UUID, id string) error
 	AttachFile(ctx context.Context, userID uuid.UUID, filename string, r io.Reader) (*model.ChatFile, error)
+	History(ctx context.Context, userID uuid.UUID) (*model.ChatHistoryResponse, error)
+	Clear(ctx context.Context, userID uuid.UUID) error
 }
 
 func handleChatFileUpload(chat ChatService, limiter *rateLimiter) http.HandlerFunc {
@@ -102,13 +104,48 @@ func handleChatConfirm(chat ChatService) http.HandlerFunc {
 			return
 		}
 
-		summary, err := chat.Confirm(r.Context(), userID, r.PathValue("id"))
+		response, err := chat.Confirm(r.Context(), userID, r.PathValue("id"))
 		if err != nil {
 			respondChatError(w, err)
 			return
 		}
 
-		respondJSON(w, http.StatusOK, model.ChatResponse{Reply: summary, ToolCalls: []model.ChatToolCall{}})
+		respondJSON(w, http.StatusOK, response)
+	}
+}
+
+func handleChatHistory(chat ChatService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, err := userIDFromContext(r.Context())
+		if err != nil {
+			respondError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		history, err := chat.History(r.Context(), userID)
+		if err != nil {
+			respondChatError(w, err)
+			return
+		}
+
+		respondJSON(w, http.StatusOK, history)
+	}
+}
+
+func handleChatClear(chat ChatService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, err := userIDFromContext(r.Context())
+		if err != nil {
+			respondError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		if err := chat.Clear(r.Context(), userID); err != nil {
+			respondChatError(w, err)
+			return
+		}
+
+		respondJSON(w, http.StatusOK, model.MessageResponse{Message: "chat cleared"})
 	}
 }
 
@@ -133,6 +170,10 @@ func respondChatError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, service.ErrLLMNotConfigured):
 		respondError(w, http.StatusServiceUnavailable, "chat is not configured")
+	case errors.Is(err, service.ErrChatTokenLimitReached):
+		respondError(w, http.StatusTooManyRequests, err.Error())
+	case errors.Is(err, service.ErrChatMessageRequired):
+		respondError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, service.ErrPendingActionNotFound):
 		respondError(w, http.StatusNotFound, "pending action not found")
 	case errors.Is(err, service.ErrChatTooManySteps):

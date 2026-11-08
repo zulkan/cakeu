@@ -1,14 +1,15 @@
 package model
 
-type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
 
 type ChatRequest struct {
-	Messages []ChatMessage `json:"messages"`
-	FileID   string        `json:"file_id,omitempty"`
-	Sheet    string        `json:"sheet,omitempty"`
+	Content string `json:"content"`
+	FileID  string `json:"file_id,omitempty"`
+	Sheet   string `json:"sheet,omitempty"`
 }
 
 type ChatFile struct {
@@ -32,8 +33,34 @@ type ChatPendingAction struct {
 	Summary string `json:"summary"`
 }
 
+type ChatTokenUsage struct {
+	Used         int  `json:"used"`
+	Limit        int  `json:"limit"`
+	Remaining    int  `json:"remaining"`
+	LimitReached bool `json:"limit_reached"`
+}
+
+type ChatHistoryMessage struct {
+	ID        uuid.UUID `json:"id"`
+	Role      string    `json:"role"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type NewChatMessage struct {
+	Role       string
+	Content    string
+	TokenCount int
+}
+
+type ChatHistoryResponse struct {
+	Messages   []ChatHistoryMessage `json:"messages"`
+	TokenUsage ChatTokenUsage       `json:"token_usage"`
+}
+
 type ChatResponse struct {
 	Reply         string             `json:"reply"`
 	ToolCalls     []ChatToolCall     `json:"tool_calls"`
 	PendingAction *ChatPendingAction `json:"pending_action,omitempty"`
+	TokenUsage    *ChatTokenUsage    `json:"token_usage,omitempty"`
 }
