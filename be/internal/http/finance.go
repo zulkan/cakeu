@@ -34,6 +34,7 @@ type CategoryService interface {
 	CreateCategory(ctx context.Context, userID uuid.UUID, req model.CreateCategoryRequest) (*model.Category, error)
 	GetCategory(ctx context.Context, id uuid.UUID) (*model.Category, error)
 	ListCategories(ctx context.Context, userID uuid.UUID) ([]model.Category, error)
+	UpdateCategory(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.UpdateCategoryRequest) (*model.Category, error)
 	DeleteCategory(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
 }
 
@@ -43,9 +44,11 @@ type TransactionService interface {
 	ListTransactions(ctx context.Context, userID uuid.UUID, filters model.TransactionFilters) (*model.PaginatedTransactions, error)
 	ExportTransactions(ctx context.Context, userID uuid.UUID, filters model.TransactionFilters, emit func(model.TransactionExportRow) error) error
 	PreviewImport(ctx context.Context, userID uuid.UUID, r io.Reader) (*model.ImportResult, error)
-	ImportTransactions(ctx context.Context, userID uuid.UUID, r io.Reader) (*model.ImportResult, error)
+	ImportTransactions(ctx context.Context, userID uuid.UUID, r io.Reader, allowDuplicates bool) (*model.ImportResult, error)
 	UpdateTransaction(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.UpdateTransactionRequest) (*model.Transaction, error)
 	DeleteTransaction(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
+	CreateTransfer(ctx context.Context, userID uuid.UUID, req model.CreateTransferRequest) (*model.TransferResult, error)
+	DeleteTransfer(ctx context.Context, userID uuid.UUID, groupID uuid.UUID) error
 	GetDashboardSummary(ctx context.Context, userID uuid.UUID) (*model.DashboardSummary, error)
 }
 
@@ -222,7 +225,7 @@ func handleAdjustAccountBalance(accounts AccountService) http.HandlerFunc {
 // @Failure 401 {object} model.ErrorResponse
 // @Failure 404 {object} model.ErrorResponse
 // @Router /api/accounts/{id} [delete]
-func handleDeleteAccount(accounts AccountService) http.HandlerFunc {
+func handleDeleteAccount(accounts AccountService, attachments AttachmentService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID, err := userIDFromContext(r.Context())
 		if err != nil {
@@ -235,9 +238,22 @@ func handleDeleteAccount(accounts AccountService) http.HandlerFunc {
 			return
 		}
 
+		var storageKeys []string
+		if attachments != nil {
+			storageKeys, err = attachments.StorageKeysForAccount(r.Context(), userID, id)
+			if err != nil {
+				slog.WarnContext(r.Context(), "collect account attachment storage keys", "account_id", id.String(), "error", err)
+				storageKeys = nil
+			}
+		}
+
 		if err := accounts.DeleteAccount(r.Context(), userID, id); err != nil {
 			respondServiceError(w, err)
 			return
+		}
+
+		if attachments != nil {
+			attachments.RemoveFiles(storageKeys)
 		}
 
 		w.WriteHeader(http.StatusNoContent)
@@ -309,15 +325,66 @@ func handleCreateCategory(categories CategoryService) http.HandlerFunc {
 	}
 }
 
+// UpdateCategory godoc
+// @Summary Update a category
+// @Description Rename and/or recolor a category. Changing type is not supported.
+// @Tags categories
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param id path string true "Category ID"
+// @Param request body model.UpdateCategoryRequest true "Category update request"
+// @Success 200 {object} model.Category
+// @Failure 400 {object} model.ErrorResponse
+// @Failure 401 {object} model.ErrorResponse
+// @Failure 404 {object} model.ErrorResponse
+// @Failure 409 {object} model.ErrorResponse
+// @Router /api/categories/{id} [patch]
+func handleUpdateCategory(categories CategoryService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, err := userIDFromContext(r.Context())
+		if err != nil {
+			respondError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		id, ok := parseUUIDPath(w, r, "id")
+		if !ok {
+			return
+		}
+
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		var req model.UpdateCategoryRequest
+		if err := decoder.Decode(&req); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		if req.Type != nil {
+			respondError(w, http.StatusBadRequest, "changing category type is not supported")
+			return
+		}
+
+		category, err := categories.UpdateCategory(r.Context(), userID, id, req)
+		if err != nil {
+			respondServiceError(w, err)
+			return
+		}
+
+		respondJSON(w, http.StatusOK, category)
+	}
+}
+
 // DeleteCategory godoc
 // @Summary Delete a category
-// @Description Delete a category and its transactions
+// @Description Delete an unused category. Categories that still have transactions are rejected with 409.
 // @Tags categories
 // @Security BearerAuth
 // @Param id path string true "Category ID"
 // @Success 204
 // @Failure 401 {object} model.ErrorResponse
 // @Failure 404 {object} model.ErrorResponse
+// @Failure 409 {object} model.ErrorResponse
 // @Router /api/categories/{id} [delete]
 func handleDeleteCategory(categories CategoryService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -533,10 +600,11 @@ func handleImportTransactions(imports ImportService) http.HandlerFunc {
 		}
 
 		result, err := imports.Import(r.Context(), userID, table, sheets, service.ImportOptions{
-			Filename: filename,
-			Sheet:    table.Name,
-			Mode:     importModeFromRequest(r),
-			Mapping:  mapping,
+			Filename:        filename,
+			Sheet:           table.Name,
+			Mode:            importModeFromRequest(r),
+			Mapping:         mapping,
+			AllowDuplicates: strings.EqualFold(strings.TrimSpace(r.FormValue("allow_duplicates")), "true"),
 		})
 		if err != nil {
 			respondImportError(w, err)
@@ -672,7 +740,7 @@ func handleUpdateTransaction(transactions TransactionService) http.HandlerFunc {
 // @Failure 401 {object} model.ErrorResponse
 // @Failure 404 {object} model.ErrorResponse
 // @Router /api/transactions/{id} [delete]
-func handleDeleteTransaction(transactions TransactionService) http.HandlerFunc {
+func handleDeleteTransaction(transactions TransactionService, attachments AttachmentService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID, err := userIDFromContext(r.Context())
 		if err != nil {
@@ -685,7 +753,90 @@ func handleDeleteTransaction(transactions TransactionService) http.HandlerFunc {
 			return
 		}
 
+		var storageKeys []string
+		if attachments != nil {
+			storageKeys, err = attachments.StorageKeysForTransaction(r.Context(), userID, id)
+			if err != nil {
+				slog.WarnContext(r.Context(), "collect transaction attachment storage keys", "transaction_id", id.String(), "error", err)
+				storageKeys = nil
+			}
+		}
+
 		if err := transactions.DeleteTransaction(r.Context(), userID, id); err != nil {
+			respondServiceError(w, err)
+			return
+		}
+
+		if attachments != nil {
+			attachments.RemoveFiles(storageKeys)
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// CreateTransfer godoc
+// @Summary Create a transfer
+// @Description Move money between two same-currency accounts as a paired ledger entry
+// @Tags transfers
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param request body model.CreateTransferRequest true "Transfer request"
+// @Success 201 {object} model.TransferResult
+// @Failure 400 {object} model.ErrorResponse
+// @Failure 401 {object} model.ErrorResponse
+// @Failure 404 {object} model.ErrorResponse
+// @Router /api/transfers [post]
+func handleCreateTransfer(transactions TransactionService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, err := userIDFromContext(r.Context())
+		if err != nil {
+			respondError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		var req model.CreateTransferRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		transfer, err := transactions.CreateTransfer(r.Context(), userID, req)
+		if err != nil {
+			respondServiceError(w, err)
+			return
+		}
+
+		respondJSON(w, http.StatusCreated, transfer)
+	}
+}
+
+// DeleteTransfer godoc
+// @Summary Delete a transfer
+// @Description Delete both ledger legs of a transfer
+// @Tags transfers
+// @Security BearerAuth
+// @Param group_id path string true "Transfer group ID"
+// @Success 204
+// @Failure 400 {object} model.ErrorResponse
+// @Failure 401 {object} model.ErrorResponse
+// @Failure 404 {object} model.ErrorResponse
+// @Router /api/transfers/{group_id} [delete]
+func handleDeleteTransfer(transactions TransactionService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, err := userIDFromContext(r.Context())
+		if err != nil {
+			respondError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		groupID, ok := parseUUIDPath(w, r, "group_id")
+		if !ok {
+			return
+		}
+
+		if err := transactions.DeleteTransfer(r.Context(), userID, groupID); err != nil {
 			respondServiceError(w, err)
 			return
 		}
@@ -803,16 +954,22 @@ func respondServiceError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, service.ErrAccountNotFound),
 		errors.Is(err, service.ErrCategoryNotFound),
-		errors.Is(err, service.ErrTransactionNotFound):
+		errors.Is(err, service.ErrTransactionNotFound),
+		errors.Is(err, service.ErrTransferNotFound):
 		respondError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, service.ErrAccountNameExists),
-		errors.Is(err, service.ErrCategoryNameExists):
+		errors.Is(err, service.ErrCategoryNameExists),
+		errors.Is(err, service.ErrCategoryInUse),
+		errors.Is(err, service.ErrAccountHasTransfers):
 		respondError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, service.ErrInvalidAmount),
 		errors.Is(err, service.ErrInvalidType),
 		errors.Is(err, service.ErrInvalidName),
 		errors.Is(err, service.ErrInvalidCurrency),
 		errors.Is(err, service.ErrInvalidBalance),
+		errors.Is(err, service.ErrInvalidDate),
+		errors.Is(err, service.ErrSameAccount),
+		errors.Is(err, service.ErrTransferCurrencyMismatch),
 		errors.Is(err, service.ErrUseAdjustmentEndpoint),
 		errors.Is(err, service.ErrImportTooManyRows),
 		errors.Is(err, service.ErrImportMissingColumns):

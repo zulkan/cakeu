@@ -23,6 +23,15 @@ var (
 	ErrInvalidToken     = errors.New("invalid or expired token")
 	ErrTokenExpired     = errors.New("token expired")
 	ErrPasswordTooShort = errors.New("password too short")
+	ErrPasswordTooLong  = errors.New("password too long")
+)
+
+const (
+	// MinPasswordLength is the minimum number of characters accepted.
+	MinPasswordLength = 8
+	// MaxPasswordLength is bcrypt's input limit in bytes; longer inputs are
+	// silently truncated, which would make distinct passwords equivalent.
+	MaxPasswordLength = 72
 )
 
 type UserRepository interface {
@@ -60,6 +69,10 @@ func NewAuthService(userRepo UserRepository, tokenRepo TokenRepository, emailer 
 }
 
 func (s *AuthService) Register(ctx context.Context, req model.RegisterRequest) (*model.User, error) {
+	if err := validatePassword(req.Password); err != nil {
+		return nil, err
+	}
+
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, fmt.Errorf("hash password: %w", err)
@@ -149,8 +162,11 @@ func (s *AuthService) ResetPassword(ctx context.Context, req model.ResetPassword
 		return ErrTokenExpired
 	}
 
-	if len(req.Password) < 8 {
+	if len(req.Password) < MinPasswordLength {
 		return ErrPasswordTooShort
+	}
+	if len(req.Password) > MaxPasswordLength {
+		return ErrPasswordTooLong
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
@@ -166,6 +182,47 @@ func (s *AuthService) ResetPassword(ctx context.Context, req model.ResetPassword
 		return fmt.Errorf("invalidate tokens: %w", err)
 	}
 
+	return nil
+}
+
+// ChangePassword verifies the caller's current password before replacing it.
+// The new password is subject to the same policy as registration and reset.
+func (s *AuthService) ChangePassword(ctx context.Context, userID uuid.UUID, currentPassword, newPassword string) error {
+	user, err := s.userRepo.GetUserByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return ErrUserNotFound
+		}
+		return fmt.Errorf("get user: %w", err)
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(currentPassword)); err != nil {
+		return ErrInvalidPassword
+	}
+
+	if err := validatePassword(newPassword); err != nil {
+		return err
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+
+	if err := s.userRepo.UpdatePassword(ctx, userID, string(hash)); err != nil {
+		return fmt.Errorf("update password: %w", err)
+	}
+
+	return nil
+}
+
+func validatePassword(password string) error {
+	if len(password) < MinPasswordLength {
+		return ErrPasswordTooShort
+	}
+	if len(password) > MaxPasswordLength {
+		return ErrPasswordTooLong
+	}
 	return nil
 }
 

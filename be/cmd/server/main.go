@@ -15,6 +15,7 @@ import (
 	"github.com/joho/godotenv"
 
 	_ "goskeleton/docs"
+	attachmentstore "goskeleton/internal/attachment"
 	appconfig "goskeleton/internal/config"
 	"goskeleton/internal/db"
 	httpserver "goskeleton/internal/http"
@@ -45,6 +46,16 @@ func main() {
 			logger.Error("close logger", "error", err)
 		}
 	}()
+
+	for _, warning := range cfg.Warnings {
+		logger.Warn(warning)
+	}
+
+	attachmentStore, err := attachmentstore.NewLocalStore(cfg.AttachmentsDir)
+	if err != nil {
+		logger.Error("create attachment store", "error", err, "dir", cfg.AttachmentsDir)
+		os.Exit(1)
+	}
 
 	dbClient, err := db.New(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -84,6 +95,7 @@ func main() {
 	accountService := service.NewAccountService(accountRepo)
 	categoryService := service.NewCategoryService(categoryRepo)
 	transactionService := service.NewTransactionService(transactionRepo, accountRepo, categoryRepo)
+	attachmentService := service.NewAttachmentService(db.NewAttachmentRepo(dbClient.Pool()), transactionService, attachmentStore)
 
 	budgetService := service.NewBudgetService(db.NewBudgetRepo(dbClient.Pool()))
 	recurringService := service.NewRecurringService(db.NewRecurringRepo(dbClient.Pool()), transactionService)
@@ -122,6 +134,7 @@ func main() {
 		recurringService,
 		reportService,
 		chatService,
+		attachmentService,
 		cfg.JWTSecret,
 		buildAllowedOrigins(cfg.FrontendURL),
 	)

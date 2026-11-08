@@ -24,19 +24,19 @@ func NewBudgetRepo(pool *pgxpool.Pool) *BudgetRepo {
 	return &BudgetRepo{pool: pool}
 }
 
-func (r *BudgetRepo) Upsert(ctx context.Context, userID, categoryID uuid.UUID, month time.Time, amount float64) (*model.Budget, error) {
+func (r *BudgetRepo) Upsert(ctx context.Context, userID, categoryID uuid.UUID, month time.Time, currency string, amount float64) (*model.Budget, error) {
 	query := `
-		INSERT INTO budgets (user_id, category_id, month, amount)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (user_id, category_id, month)
+		INSERT INTO budgets (user_id, category_id, month, currency, amount)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (user_id, category_id, month, currency)
 		DO UPDATE SET amount = EXCLUDED.amount, updated_at = NOW()
-		RETURNING id, user_id, category_id, month, amount, created_at, updated_at
+		RETURNING id, user_id, category_id, month, currency, amount, created_at, updated_at
 	`
 
 	var budget model.Budget
-	err := r.pool.QueryRow(ctx, query, userID, categoryID, month, amount).Scan(
+	err := r.pool.QueryRow(ctx, query, userID, categoryID, month, currency, amount).Scan(
 		&budget.ID, &budget.UserID, &budget.CategoryID, &budget.Month,
-		&budget.Amount, &budget.CreatedAt, &budget.UpdatedAt,
+		&budget.Currency, &budget.Amount, &budget.CreatedAt, &budget.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("upsert budget: %w", err)
@@ -51,10 +51,10 @@ func (r *BudgetRepo) Upsert(ctx context.Context, userID, categoryID uuid.UUID, m
 	return &budget, nil
 }
 
-func (r *BudgetRepo) Delete(ctx context.Context, userID, categoryID uuid.UUID, month time.Time) error {
+func (r *BudgetRepo) Delete(ctx context.Context, userID, categoryID uuid.UUID, month time.Time, currency string) error {
 	tag, err := r.pool.Exec(ctx,
-		`DELETE FROM budgets WHERE user_id = $1 AND category_id = $2 AND month = $3`,
-		userID, categoryID, month,
+		`DELETE FROM budgets WHERE user_id = $1 AND category_id = $2 AND month = $3 AND currency = $4`,
+		userID, categoryID, month, currency,
 	)
 	if err != nil {
 		return fmt.Errorf("delete budget: %w", err)
@@ -68,11 +68,11 @@ func (r *BudgetRepo) Delete(ctx context.Context, userID, categoryID uuid.UUID, m
 
 func (r *BudgetRepo) ListByMonth(ctx context.Context, userID uuid.UUID, month time.Time) ([]model.Budget, error) {
 	query := `
-		SELECT b.id, b.user_id, b.category_id, c.name, b.month, b.amount, b.created_at, b.updated_at
+		SELECT b.id, b.user_id, b.category_id, c.name, b.month, b.currency, b.amount, b.created_at, b.updated_at
 		FROM budgets b
 		JOIN categories c ON c.id = b.category_id
 		WHERE b.user_id = $1 AND b.month = $2
-		ORDER BY c.name
+		ORDER BY b.currency, c.name
 	`
 
 	rows, err := r.pool.Query(ctx, query, userID, month)
@@ -86,7 +86,7 @@ func (r *BudgetRepo) ListByMonth(ctx context.Context, userID uuid.UUID, month ti
 		var budget model.Budget
 		if err := rows.Scan(
 			&budget.ID, &budget.UserID, &budget.CategoryID, &budget.CategoryName,
-			&budget.Month, &budget.Amount, &budget.CreatedAt, &budget.UpdatedAt,
+			&budget.Month, &budget.Currency, &budget.Amount, &budget.CreatedAt, &budget.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan budget: %w", err)
 		}
@@ -99,18 +99,21 @@ func (r *BudgetRepo) ListByMonth(ctx context.Context, userID uuid.UUID, month ti
 	return budgets, nil
 }
 
-func (r *BudgetRepo) SpentByCategory(ctx context.Context, userID uuid.UUID, month time.Time) (map[uuid.UUID]float64, error) {
+func (r *BudgetRepo) SpentByCategory(ctx context.Context, userID uuid.UUID, month time.Time, currency string) (map[uuid.UUID]float64, error) {
 	query := `
-		SELECT category_id, COALESCE(SUM(amount), 0)
-		FROM transactions
-		WHERE user_id = $1
-		  AND type = 'expense'
-		  AND date >= $2
-		  AND date < ($2::date + INTERVAL '1 month')
-		GROUP BY category_id
+		SELECT t.category_id, COALESCE(SUM(t.amount), 0)
+		FROM transactions t
+		JOIN accounts a ON a.id = t.account_id
+		WHERE t.user_id = $1
+		  AND t.kind = 'normal'
+		  AND t.type = 'expense'
+		  AND a.currency = $3
+		  AND t.date >= $2
+		  AND t.date < ($2::date + INTERVAL '1 month')
+		GROUP BY t.category_id
 	`
 
-	rows, err := r.pool.Query(ctx, query, userID, month)
+	rows, err := r.pool.Query(ctx, query, userID, month, currency)
 	if err != nil {
 		return nil, fmt.Errorf("sum spending by category: %w", err)
 	}

@@ -30,10 +30,11 @@ type ImportSettings struct {
 }
 
 type ImportOptions struct {
-	Filename string
-	Sheet    string
-	Mode     ImportMode
-	Mapping  *model.ImportMapping
+	Filename        string
+	Sheet           string
+	Mode            ImportMode
+	Mapping         *model.ImportMapping
+	AllowDuplicates bool
 }
 
 type ImportService interface {
@@ -100,12 +101,12 @@ func (s *importService) Preview(ctx context.Context, userID uuid.UUID, table *sp
 
 func (s *importService) Import(ctx context.Context, userID uuid.UUID, table *spreadsheet.Table, sheetNames []string, opts ImportOptions) (*model.ImportResult, error) {
 	if s.effectiveMode(opts.Mode) == ImportModeStrict {
-		return s.importStrict(ctx, userID, table, sheetNames)
+		return s.importStrict(ctx, userID, table, sheetNames, opts.AllowDuplicates)
 	}
 	if opts.Mapping == nil {
 		return nil, fmt.Errorf("%w: mapping is required for AI imports", ErrInvalidMapping)
 	}
-	return s.importWithPlan(ctx, userID, table, sheetNames, opts.Mapping)
+	return s.importWithPlan(ctx, userID, table, sheetNames, opts.Mapping, opts.AllowDuplicates)
 }
 
 func (s *importService) effectiveMode(requested ImportMode) ImportMode {
@@ -133,12 +134,12 @@ func (s *importService) previewStrict(ctx context.Context, userID uuid.UUID, tab
 	return result, nil
 }
 
-func (s *importService) importStrict(ctx context.Context, userID uuid.UUID, table *spreadsheet.Table, sheetNames []string) (*model.ImportResult, error) {
+func (s *importService) importStrict(ctx context.Context, userID uuid.UUID, table *spreadsheet.Table, sheetNames []string, allowDuplicates bool) (*model.ImportResult, error) {
 	csvText, err := table.ToCSV()
 	if err != nil {
 		return nil, fmt.Errorf("encode sheet: %w", err)
 	}
-	result, err := s.transactions.ImportTransactions(ctx, userID, strings.NewReader(csvText))
+	result, err := s.transactions.ImportTransactions(ctx, userID, strings.NewReader(csvText), allowDuplicates)
 	if err != nil {
 		return nil, err
 	}
@@ -166,12 +167,12 @@ func (s *importService) previewWithPlan(ctx context.Context, userID uuid.UUID, t
 	return result, nil
 }
 
-func (s *importService) importWithPlan(ctx context.Context, userID uuid.UUID, table *spreadsheet.Table, sheetNames []string, plan *model.ImportMapping) (*model.ImportResult, error) {
+func (s *importService) importWithPlan(ctx context.Context, userID uuid.UUID, table *spreadsheet.Table, sheetNames []string, plan *model.ImportMapping, allowDuplicates bool) (*model.ImportResult, error) {
 	csvText, origins, skipped, err := s.applyPlanForUser(ctx, userID, table, plan)
 	if err != nil {
 		return nil, err
 	}
-	result, err := s.transactions.ImportTransactions(ctx, userID, strings.NewReader(csvText))
+	result, err := s.transactions.ImportTransactions(ctx, userID, strings.NewReader(csvText), allowDuplicates)
 	if err != nil {
 		return nil, err
 	}

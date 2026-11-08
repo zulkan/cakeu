@@ -15,8 +15,8 @@ import (
 
 type BudgetService interface {
 	List(ctx context.Context, userID uuid.UUID, month time.Time) ([]model.BudgetStatus, error)
-	Upsert(ctx context.Context, userID, categoryID uuid.UUID, month time.Time, amount float64) (*model.Budget, error)
-	Delete(ctx context.Context, userID, categoryID uuid.UUID, month time.Time) error
+	Upsert(ctx context.Context, userID, categoryID uuid.UUID, month time.Time, currency string, amount float64) (*model.Budget, error)
+	Delete(ctx context.Context, userID, categoryID uuid.UUID, month time.Time, currency string) error
 }
 
 func HandleListBudgets(budgets BudgetService) http.HandlerFunc {
@@ -67,7 +67,7 @@ func HandleUpsertBudget(budgets BudgetService) http.HandlerFunc {
 			return
 		}
 
-		budget, err := budgets.Upsert(r.Context(), userID, req.CategoryID, month, req.Amount)
+		budget, err := budgets.Upsert(r.Context(), userID, req.CategoryID, month, req.Currency, req.Amount)
 		if err != nil {
 			respondBudgetError(w, err)
 			return
@@ -96,7 +96,9 @@ func HandleDeleteBudget(budgets BudgetService) http.HandlerFunc {
 			return
 		}
 
-		if err := budgets.Delete(r.Context(), userID, categoryID, month); err != nil {
+		currency := r.URL.Query().Get("currency")
+
+		if err := budgets.Delete(r.Context(), userID, categoryID, month, currency); err != nil {
 			respondBudgetError(w, err)
 			return
 		}
@@ -129,7 +131,9 @@ func respondBudgetError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, service.ErrBudgetNotFound):
 		respondError(w, http.StatusNotFound, err.Error())
-	case errors.Is(err, service.ErrInvalidBudgetAmount), errors.Is(err, service.ErrInvalidMonth):
+	case errors.Is(err, service.ErrInvalidBudgetAmount),
+		errors.Is(err, service.ErrInvalidMonth),
+		errors.Is(err, service.ErrInvalidCurrency):
 		respondError(w, http.StatusBadRequest, err.Error())
 	default:
 		respondError(w, http.StatusInternalServerError, "internal server error")

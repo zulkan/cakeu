@@ -241,12 +241,29 @@ func (r *AccountRepo) AdjustBalance(ctx context.Context, userID uuid.UUID, id uu
 }
 
 func (r *AccountRepo) Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
-	tag, err := r.pool.Exec(ctx, `DELETE FROM accounts WHERE id = $1 AND user_id = $2`, id, userID)
+	tag, err := r.pool.Exec(ctx, `
+		DELETE FROM accounts a
+		WHERE a.id = $1 AND a.user_id = $2
+		  AND NOT EXISTS (
+		      SELECT 1 FROM transactions t
+		      WHERE t.account_id = a.id AND t.kind = 'transfer'
+		  )
+	`, id, userID)
 	if err != nil {
 		return fmt.Errorf("delete account: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return service.ErrAccountNotFound
+		var exists bool
+		if err := r.pool.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM accounts WHERE id = $1 AND user_id = $2)`,
+			id, userID,
+		).Scan(&exists); err != nil {
+			return fmt.Errorf("check account: %w", err)
+		}
+		if !exists {
+			return service.ErrAccountNotFound
+		}
+		return service.ErrAccountHasTransfers
 	}
 
 	return nil
@@ -327,6 +344,43 @@ func (r *CategoryRepo) ListByUser(ctx context.Context, userID uuid.UUID) ([]mode
 	}
 
 	return categories, nil
+}
+
+func (r *CategoryRepo) UpdateCategory(ctx context.Context, userID uuid.UUID, id uuid.UUID, name string, color string) (model.Category, error) {
+	query := `
+		UPDATE categories
+		SET name = $3, color = $4
+		WHERE id = $1 AND user_id = $2
+		RETURNING id, user_id, name, type, color, created_at
+	`
+
+	var category model.Category
+	err := r.pool.QueryRow(ctx, query, id, userID, name, color).Scan(
+		&category.ID, &category.UserID, &category.Name, &category.Type, &category.Color, &category.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.Category{}, service.ErrCategoryNotFound
+		}
+		if isUniqueViolation(err) {
+			return model.Category{}, service.ErrCategoryNameExists
+		}
+		return model.Category{}, fmt.Errorf("update category: %w", err)
+	}
+
+	return category, nil
+}
+
+func (r *CategoryRepo) CategoryHasTransactions(ctx context.Context, userID uuid.UUID, categoryID uuid.UUID) (bool, error) {
+	var exists bool
+	if err := r.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM transactions WHERE user_id = $1 AND category_id = $2)`,
+		userID, categoryID,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check category transactions: %w", err)
+	}
+
+	return exists, nil
 }
 
 func (r *CategoryRepo) Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
@@ -420,6 +474,7 @@ func (r *TransactionRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.Tra
 	query := `
 		SELECT t.id, t.user_id, t.account_id,
 		       COALESCE(t.category_id, '00000000-0000-0000-0000-000000000000'::uuid),
+		       COALESCE(t.transfer_group_id, '00000000-0000-0000-0000-000000000000'::uuid),
 		       t.type, t.amount, t.description, t.date, t.created_at, t.kind,
 		       a.name, a.currency, COALESCE(c.name, '')
 		FROM transactions t
@@ -434,6 +489,7 @@ func (r *TransactionRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.Tra
 		&transaction.UserID,
 		&transaction.AccountID,
 		&transaction.CategoryID,
+		&transaction.TransferGroupID,
 		&transaction.Type,
 		&transaction.Amount,
 		&transaction.Description,
@@ -601,6 +657,7 @@ func (r *TransactionRepo) List(ctx context.Context, filters model.TransactionFil
 	query := fmt.Sprintf(`
 		SELECT t.id, t.user_id, t.account_id,
 		       COALESCE(t.category_id, '00000000-0000-0000-0000-000000000000'::uuid),
+		       COALESCE(t.transfer_group_id, '00000000-0000-0000-0000-000000000000'::uuid),
 		       t.type, t.amount, t.description, t.date, t.created_at, t.kind,
 		       a.name, a.currency, COALESCE(c.name, '')
 		FROM transactions t
@@ -624,6 +681,7 @@ func (r *TransactionRepo) List(ctx context.Context, filters model.TransactionFil
 			&transaction.UserID,
 			&transaction.AccountID,
 			&transaction.CategoryID,
+			&transaction.TransferGroupID,
 			&transaction.Type,
 			&transaction.Amount,
 			&transaction.Description,
@@ -750,6 +808,174 @@ func (r *TransactionRepo) CreateBatch(ctx context.Context, userID uuid.UUID, tra
 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit batch: %w", err)
+	}
+
+	return nil
+}
+
+func (r *TransactionRepo) FingerprintCandidates(ctx context.Context, userID uuid.UUID, from, to time.Time) ([]model.TransactionFingerprint, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT t.date, t.type, t.amount, t.description, a.name
+		FROM transactions t
+		JOIN accounts a ON a.id = t.account_id
+		WHERE t.user_id = $1 AND t.kind = 'normal' AND t.date >= $2 AND t.date <= $3
+	`, userID, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("query transaction fingerprints: %w", err)
+	}
+	defer rows.Close()
+
+	fingerprints := make([]model.TransactionFingerprint, 0, 16)
+	for rows.Next() {
+		var fingerprint model.TransactionFingerprint
+		if err := rows.Scan(
+			&fingerprint.Date,
+			&fingerprint.Type,
+			&fingerprint.Amount,
+			&fingerprint.Description,
+			&fingerprint.AccountName,
+		); err != nil {
+			return nil, fmt.Errorf("scan transaction fingerprint: %w", err)
+		}
+		fingerprints = append(fingerprints, fingerprint)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate transaction fingerprints: %w", err)
+	}
+
+	return fingerprints, nil
+}
+
+func (r *TransactionRepo) CreateTransfer(ctx context.Context, userID uuid.UUID, req model.CreateTransferRequest) (*model.TransferResult, error) {
+	if req.FromAccountID == req.ToAccountID {
+		return nil, service.ErrSameAccount
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin transfer: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	ids := []uuid.UUID{req.FromAccountID, req.ToAccountID}
+	if err := lockAccounts(ctx, tx, userID, ids); err != nil {
+		return nil, err
+	}
+
+	currencies := make(map[uuid.UUID]string, len(ids))
+	for _, id := range ids {
+		var currency string
+		err := tx.QueryRow(ctx,
+			`SELECT currency FROM accounts WHERE id = $1 AND user_id = $2`,
+			id, userID,
+		).Scan(&currency)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, service.ErrAccountNotFound
+			}
+			return nil, fmt.Errorf("select transfer account: %w", err)
+		}
+		currencies[id] = currency
+	}
+	if currencies[req.FromAccountID] != currencies[req.ToAccountID] {
+		return nil, service.ErrTransferCurrencyMismatch
+	}
+
+	groupID := uuid.New()
+	amount := math.Abs(req.Amount)
+	description := strings.TrimSpace(req.Description)
+	if description == "" {
+		description = "Transfer"
+	}
+
+	query := `
+		WITH inserted AS (
+		    INSERT INTO transactions (user_id, account_id, category_id, type, amount, description, date, kind, transfer_group_id)
+		    VALUES
+		        ($1, $2, NULL, 'expense', $4, $5, $6::date, 'transfer', $7),
+		        ($1, $3, NULL, 'income', $4, $5, $6::date, 'transfer', $7)
+		    RETURNING id, user_id, account_id,
+		              COALESCE(category_id, '00000000-0000-0000-0000-000000000000'::uuid) AS category_id,
+		              type, amount, description, date, created_at, kind, transfer_group_id
+		)
+		SELECT i.id, i.user_id, i.account_id, i.category_id, i.transfer_group_id,
+		       i.type, i.amount, i.description, i.date, i.created_at, i.kind,
+		       a.name, a.currency
+		FROM inserted i
+		JOIN accounts a ON a.id = i.account_id
+	`
+
+	rows, err := tx.Query(ctx, query,
+		userID,
+		req.FromAccountID,
+		req.ToAccountID,
+		amount,
+		description,
+		req.Date,
+		groupID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("insert transfer: %w", err)
+	}
+	defer rows.Close()
+
+	result := model.TransferResult{TransferGroupID: groupID}
+	legs := 0
+	for rows.Next() {
+		var leg model.Transaction
+		if err := rows.Scan(
+			&leg.ID,
+			&leg.UserID,
+			&leg.AccountID,
+			&leg.CategoryID,
+			&leg.TransferGroupID,
+			&leg.Type,
+			&leg.Amount,
+			&leg.Description,
+			&leg.Date,
+			&leg.CreatedAt,
+			&leg.Kind,
+			&leg.AccountName,
+			&leg.Currency,
+		); err != nil {
+			return nil, fmt.Errorf("scan transfer leg: %w", err)
+		}
+		switch leg.AccountID {
+		case req.FromAccountID:
+			result.From = leg
+		case req.ToAccountID:
+			result.To = leg
+		default:
+			return nil, fmt.Errorf("insert transfer: unexpected account %s", leg.AccountID)
+		}
+		legs++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate transfer legs: %w", err)
+	}
+	if legs != 2 {
+		return nil, fmt.Errorf("insert transfer: expected 2 legs, got %d", legs)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit transfer: %w", err)
+	}
+
+	return &result, nil
+}
+
+func (r *TransactionRepo) DeleteTransfer(ctx context.Context, userID uuid.UUID, groupID uuid.UUID) error {
+	tag, err := r.pool.Exec(ctx,
+		`DELETE FROM transactions WHERE user_id = $1 AND transfer_group_id = $2`,
+		userID, groupID,
+	)
+	if err != nil {
+		return fmt.Errorf("delete transfer: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return service.ErrTransferNotFound
 	}
 
 	return nil

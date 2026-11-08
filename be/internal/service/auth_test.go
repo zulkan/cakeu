@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -254,6 +255,128 @@ func TestAuthServiceResetPassword(t *testing.T) {
 	}
 	if tokenRepo.invalidateCalls != 1 || tokenRepo.invalidateLastID != userID {
 		t.Fatalf("expected sibling tokens invalidated for user %s, got calls=%d last=%s", userID, tokenRepo.invalidateCalls, tokenRepo.invalidateLastID)
+	}
+}
+
+func TestAuthServiceRegisterRejectsInvalidPasswordLength(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		password string
+		wantErr  error
+	}{
+		{name: "too short", password: "short", wantErr: service.ErrPasswordTooShort},
+		{name: "too long", password: strings.Repeat("a", 73), wantErr: service.ErrPasswordTooLong},
+		{name: "minimum length", password: strings.Repeat("a", 8), wantErr: nil},
+		{name: "maximum length", password: strings.Repeat("a", 72), wantErr: nil},
+	}
+
+	for _, testCase := range tests {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			userRepo := &fakeUserRepo{}
+			auth := service.NewAuthService(userRepo, &fakeTokenRepo{}, &fakeEmailSender{}, "secret")
+
+			_, err := auth.Register(context.Background(), model.RegisterRequest{
+				Email:    "test@example.com",
+				Password: testCase.password,
+			})
+			if !errors.Is(err, testCase.wantErr) {
+				t.Fatalf("expected %v, got %v", testCase.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestAuthServiceChangePassword(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	hash, _ := bcrypt.GenerateFromPassword([]byte("oldpassword123"), bcrypt.DefaultCost)
+	userRepo := &fakeUserRepo{
+		userByID: &model.User{ID: userID, Email: "test@example.com", PasswordHash: string(hash)},
+	}
+	auth := service.NewAuthService(userRepo, &fakeTokenRepo{}, &fakeEmailSender{}, "secret")
+
+	err := auth.ChangePassword(context.Background(), userID, "oldpassword123", "newpassword123")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if userRepo.updatedID != userID {
+		t.Fatalf("expected password update for user %s, got %s", userID, userRepo.updatedID)
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(userRepo.updatedPw), []byte("newpassword123")); err != nil {
+		t.Fatalf("expected new password hash to match, got %v", err)
+	}
+}
+
+func TestAuthServiceChangePasswordRejectsWrongCurrentPassword(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	hash, _ := bcrypt.GenerateFromPassword([]byte("oldpassword123"), bcrypt.DefaultCost)
+	userRepo := &fakeUserRepo{
+		userByID: &model.User{ID: userID, PasswordHash: string(hash)},
+	}
+	auth := service.NewAuthService(userRepo, &fakeTokenRepo{}, &fakeEmailSender{}, "secret")
+
+	err := auth.ChangePassword(context.Background(), userID, "wrongpassword", "newpassword123")
+	if !errors.Is(err, service.ErrInvalidPassword) {
+		t.Fatalf("expected ErrInvalidPassword, got %v", err)
+	}
+	if userRepo.updatedPw != "" {
+		t.Fatal("expected no password update when the current password is wrong")
+	}
+}
+
+func TestAuthServiceChangePasswordRejectsInvalidNewPassword(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		newPassword string
+		wantErr     error
+	}{
+		{name: "too short", newPassword: "short", wantErr: service.ErrPasswordTooShort},
+		{name: "too long", newPassword: strings.Repeat("a", 73), wantErr: service.ErrPasswordTooLong},
+	}
+
+	for _, testCase := range tests {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			userID := uuid.New()
+			hash, _ := bcrypt.GenerateFromPassword([]byte("oldpassword123"), bcrypt.DefaultCost)
+			userRepo := &fakeUserRepo{
+				userByID: &model.User{ID: userID, PasswordHash: string(hash)},
+			}
+			auth := service.NewAuthService(userRepo, &fakeTokenRepo{}, &fakeEmailSender{}, "secret")
+
+			err := auth.ChangePassword(context.Background(), userID, "oldpassword123", testCase.newPassword)
+			if !errors.Is(err, testCase.wantErr) {
+				t.Fatalf("expected %v, got %v", testCase.wantErr, err)
+			}
+			if userRepo.updatedPw != "" {
+				t.Fatal("expected no password update for an invalid new password")
+			}
+		})
+	}
+}
+
+func TestAuthServiceChangePasswordReturnsUserNotFound(t *testing.T) {
+	t.Parallel()
+
+	userRepo := &fakeUserRepo{}
+	auth := service.NewAuthService(userRepo, &fakeTokenRepo{}, &fakeEmailSender{}, "secret")
+
+	err := auth.ChangePassword(context.Background(), uuid.New(), "oldpassword123", "newpassword123")
+	if !errors.Is(err, service.ErrUserNotFound) {
+		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 }
 

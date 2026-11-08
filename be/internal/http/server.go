@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/google/uuid"
 	httpSwagger "github.com/swaggo/http-swagger"
 
 	"goskeleton/internal/model"
@@ -23,6 +24,7 @@ type AuthService interface {
 	Login(ctx context.Context, req model.LoginRequest) (*model.LoginResponse, error)
 	RequestPasswordReset(ctx context.Context, req model.ForgotPasswordRequest) error
 	ResetPassword(ctx context.Context, req model.ResetPasswordRequest) error
+	ChangePassword(ctx context.Context, userID uuid.UUID, currentPassword, newPassword string) error
 }
 
 // NewHandler creates a new HTTP handler with all routes.
@@ -32,7 +34,7 @@ type AuthService interface {
 // @host localhost:8080
 // @BasePath /
 // @schemes http
-func NewHandler(health HealthChecker, auth AuthService, accounts AccountService, categories CategoryService, transactions TransactionService, imports ImportService, importMode service.ImportMode, budgets BudgetService, recurring RecurringService, reports ReportService, chat ChatService, jwtSecret string, allowedOrigins []string) http.Handler {
+func NewHandler(health HealthChecker, auth AuthService, accounts AccountService, categories CategoryService, transactions TransactionService, imports ImportService, importMode service.ImportMode, budgets BudgetService, recurring RecurringService, reports ReportService, chat ChatService, attachments AttachmentService, jwtSecret string, allowedOrigins []string) http.Handler {
 	mux := http.NewServeMux()
 
 	// Health endpoint (local only)
@@ -52,10 +54,12 @@ func NewHandler(health HealthChecker, auth AuthService, accounts AccountService,
 
 	// Auth endpoints
 	authLimiter := newRateLimiter(5, 15*time.Minute)
+	loginLimiter := newRateLimiter(10, 15*time.Minute)
 	mux.HandleFunc("POST /api/auth/register", handleRegister(auth))
-	mux.HandleFunc("POST /api/auth/login", handleLogin(auth))
+	mux.HandleFunc("POST /api/auth/login", loginLimiter.wrap(handleLogin(auth)))
 	mux.HandleFunc("POST /api/auth/forgot-password", authLimiter.wrap(handleForgotPassword(auth)))
 	mux.HandleFunc("POST /api/auth/reset-password", handleResetPassword(auth))
+	mux.Handle("POST /api/auth/change-password", JWTAuth(jwtSecret)(http.HandlerFunc(handleChangePassword(auth))))
 
 	// Finance API endpoints (JWT protected)
 	apiMux := http.NewServeMux()
@@ -63,10 +67,11 @@ func NewHandler(health HealthChecker, auth AuthService, accounts AccountService,
 	apiMux.HandleFunc("POST /api/accounts", handleCreateAccount(accounts))
 	apiMux.HandleFunc("PATCH /api/accounts/{id}", handleUpdateAccount(accounts))
 	apiMux.HandleFunc("POST /api/accounts/{id}/adjustments", handleAdjustAccountBalance(accounts))
-	apiMux.HandleFunc("DELETE /api/accounts/{id}", handleDeleteAccount(accounts))
+	apiMux.HandleFunc("DELETE /api/accounts/{id}", handleDeleteAccount(accounts, attachments))
 
 	apiMux.HandleFunc("GET /api/categories", handleListCategories(categories))
 	apiMux.HandleFunc("POST /api/categories", handleCreateCategory(categories))
+	apiMux.HandleFunc("PATCH /api/categories/{id}", handleUpdateCategory(categories))
 	apiMux.HandleFunc("DELETE /api/categories/{id}", handleDeleteCategory(categories))
 
 	apiMux.HandleFunc("GET /api/transactions", handleListTransactions(transactions))
@@ -79,7 +84,15 @@ func NewHandler(health HealthChecker, auth AuthService, accounts AccountService,
 	apiMux.HandleFunc("POST /api/transactions/import", handleImportTransactions(imports))
 	apiMux.HandleFunc("POST /api/transactions", handleCreateTransaction(transactions))
 	apiMux.HandleFunc("PATCH /api/transactions/{id}", handleUpdateTransaction(transactions))
-	apiMux.HandleFunc("DELETE /api/transactions/{id}", handleDeleteTransaction(transactions))
+	apiMux.HandleFunc("DELETE /api/transactions/{id}", handleDeleteTransaction(transactions, attachments))
+
+	apiMux.HandleFunc("POST /api/transactions/{id}/attachments", handleUploadTransactionAttachment(attachments))
+	apiMux.HandleFunc("GET /api/transactions/{id}/attachments", handleListTransactionAttachments(attachments))
+	apiMux.HandleFunc("GET /api/attachments/{id}", handleDownloadAttachment(attachments))
+	apiMux.HandleFunc("DELETE /api/attachments/{id}", handleDeleteAttachment(attachments))
+
+	apiMux.HandleFunc("POST /api/transfers", handleCreateTransfer(transactions))
+	apiMux.HandleFunc("DELETE /api/transfers/{group_id}", handleDeleteTransfer(transactions))
 
 	apiMux.HandleFunc("GET /api/dashboard/summary", handleGetDashboardSummary(transactions))
 
@@ -142,11 +155,16 @@ func handleRegister(auth AuthService) http.HandlerFunc {
 
 		user, err := auth.Register(r.Context(), req)
 		if err != nil {
-			if errors.Is(err, service.ErrEmailExists) {
+			switch {
+			case errors.Is(err, service.ErrEmailExists):
 				respondError(w, http.StatusConflict, "email already registered")
-				return
+			case errors.Is(err, service.ErrPasswordTooShort):
+				respondError(w, http.StatusBadRequest, "password must be at least 8 characters")
+			case errors.Is(err, service.ErrPasswordTooLong):
+				respondError(w, http.StatusBadRequest, "password must be at most 72 bytes")
+			default:
+				respondError(w, http.StatusInternalServerError, "registration failed")
 			}
-			respondError(w, http.StatusInternalServerError, "registration failed")
 			return
 		}
 
@@ -269,6 +287,8 @@ func handleResetPassword(auth AuthService) http.HandlerFunc {
 				respondError(w, http.StatusBadRequest, "invalid or expired token")
 			case errors.Is(err, service.ErrPasswordTooShort):
 				respondError(w, http.StatusBadRequest, "password must be at least 8 characters")
+			case errors.Is(err, service.ErrPasswordTooLong):
+				respondError(w, http.StatusBadRequest, "password must be at most 72 bytes")
 			default:
 				respondError(w, http.StatusInternalServerError, "failed to reset password")
 			}
@@ -276,6 +296,55 @@ func handleResetPassword(auth AuthService) http.HandlerFunc {
 		}
 
 		respondJSON(w, http.StatusOK, model.MessageResponse{Message: "password reset successful"})
+	}
+}
+
+// ChangePassword godoc
+// @Summary Change the authenticated user's password
+// @Description Verify the current password and replace it with a new one
+// @Tags auth
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param request body model.ChangePasswordRequest true "Change password request"
+// @Success 200 {object} model.MessageResponse
+// @Failure 400 {object} model.ErrorResponse
+// @Failure 401 {object} model.ErrorResponse
+// @Router /api/auth/change-password [post]
+func handleChangePassword(auth AuthService) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID, err := userIDFromContext(r.Context())
+		if err != nil {
+			respondError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		var req model.ChangePasswordRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+
+		if req.CurrentPassword == "" || req.NewPassword == "" {
+			respondError(w, http.StatusBadRequest, "current_password and new_password are required")
+			return
+		}
+
+		if err := auth.ChangePassword(r.Context(), userID, req.CurrentPassword, req.NewPassword); err != nil {
+			switch {
+			case errors.Is(err, service.ErrInvalidPassword), errors.Is(err, service.ErrUserNotFound):
+				respondError(w, http.StatusUnauthorized, "invalid current password")
+			case errors.Is(err, service.ErrPasswordTooShort):
+				respondError(w, http.StatusBadRequest, "password must be at least 8 characters")
+			case errors.Is(err, service.ErrPasswordTooLong):
+				respondError(w, http.StatusBadRequest, "password must be at most 72 bytes")
+			default:
+				respondError(w, http.StatusInternalServerError, "failed to change password")
+			}
+			return
+		}
+
+		respondJSON(w, http.StatusOK, model.MessageResponse{Message: "password changed successfully"})
 	}
 }
 

@@ -185,7 +185,7 @@ func (s *ChatService) Confirm(ctx context.Context, userID uuid.UUID, id string) 
 		if !ok {
 			return "", ErrPendingActionNotFound
 		}
-		_, err = s.transactions.ImportTransactions(ctx, userID, strings.NewReader(selected.csv))
+		_, err = s.transactions.ImportTransactions(ctx, userID, strings.NewReader(selected.csv), false)
 	default:
 		return "", ErrPendingActionNotFound
 	}

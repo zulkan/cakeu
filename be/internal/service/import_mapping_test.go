@@ -178,11 +178,12 @@ func TestNormalizeFormatsThroughApplyMapping(t *testing.T) {
 
 func TestRenumberImportResult(t *testing.T) {
 	result := &model.ImportResult{
-		Errors:  []model.ImportRowError{{Row: 2, Message: "bad"}},
-		Preview: []model.ImportPreviewRow{{Row: 2}},
+		Errors:     []model.ImportRowError{{Row: 2, Message: "bad"}},
+		Duplicates: []model.ImportRowError{{Row: 2, Message: "duplicate"}},
+		Preview:    []model.ImportPreviewRow{{Row: 2}},
 	}
 	service.RenumberImportResult(result, []int{9, 12})
-	if result.Errors[0].Row != 9 || result.Preview[0].Row != 9 {
+	if result.Errors[0].Row != 9 || result.Duplicates[0].Row != 9 || result.Preview[0].Row != 9 {
 		t.Fatalf("expected row 9, got %+v", result)
 	}
 }

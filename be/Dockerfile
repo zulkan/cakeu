@@ -21,7 +21,7 @@ COPY --from=build /out/server /app/server
 COPY --from=build /out/resetpassword /app/resetpassword
 COPY --from=build /src/internal/migrations /app/internal/migrations
 
-RUN mkdir -p /app/logs && chown -R app:app /app
+RUN mkdir -p /app/logs /app/data && chown -R app:app /app
 
 USER app
 

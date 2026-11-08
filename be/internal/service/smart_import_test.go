@@ -117,6 +117,76 @@ func TestImportServiceRepairsMalformedMappingOnce(t *testing.T) {
 	}
 }
 
+func TestImportServicePreviewCarriesForwardBlankDates(t *testing.T) {
+	table := &spreadsheet.Table{Name: "SHEET", Rows: [][]string{
+		{"Date", "Amount", "Description"},
+		{"2026-01-14", "1000", "first"},
+		{"", "2000", "second"},
+		{"", "3000", "third"},
+	}}
+	reply := `{
+		"sheet":"SHEET","header_row":1,"data_start":2,"data_end":4,
+		"fields":{
+			"date":{"column":1,"date_format":"iso"},
+			"amount":{"column":2},
+			"description":{"column":3},
+			"account":{"constant":"Cash"},
+			"category":{"constant":"Saving"}
+		},
+		"type":{"constant":"expense"}
+	}`
+	imports, _, _ := newImportServiceForTest(t, &stubImportLLM{replies: []string{reply}})
+
+	result, err := imports.Preview(context.Background(), uuid.New(), table, []string{"SHEET"},
+		service.ImportOptions{Filename: "book.xlsx", Sheet: "SHEET", Mode: service.ImportModeAI})
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if result.Valid != 3 || result.Invalid != 0 || len(result.Errors) != 0 {
+		t.Fatalf("expected 3 valid rows and no errors, got %+v", result)
+	}
+	for _, row := range result.Preview {
+		if row.Date != "2026-01-14" {
+			t.Fatalf("expected carried date on row %d, got %s", row.Row, row.Date)
+		}
+	}
+}
+
+func TestImportServicePreviewReportsBlankDateWithoutPrevious(t *testing.T) {
+	table := &spreadsheet.Table{Name: "SHEET", Rows: [][]string{
+		{"Date", "Amount", "Description"},
+		{"", "2000", "orphan"},
+		{"2026-01-14", "1000", "first"},
+	}}
+	reply := `{
+		"sheet":"SHEET","header_row":1,"data_start":2,"data_end":3,
+		"fields":{
+			"date":{"column":1,"date_format":"iso"},
+			"amount":{"column":2},
+			"description":{"column":3},
+			"account":{"constant":"Cash"},
+			"category":{"constant":"Saving"}
+		},
+		"type":{"constant":"expense"}
+	}`
+	imports, _, _ := newImportServiceForTest(t, &stubImportLLM{replies: []string{reply}})
+
+	result, err := imports.Preview(context.Background(), uuid.New(), table, []string{"SHEET"},
+		service.ImportOptions{Filename: "book.xlsx", Sheet: "SHEET", Mode: service.ImportModeAI})
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if result.Valid != 1 || result.Invalid != 1 || len(result.Errors) != 1 {
+		t.Fatalf("expected 1 valid and 1 invalid row, got %+v", result)
+	}
+	if result.Errors[0].Row != 2 {
+		t.Fatalf("expected the error on row 2, got row %d", result.Errors[0].Row)
+	}
+	if !strings.Contains(result.Errors[0].Message, "no previous date") {
+		t.Fatalf("expected the reason in %q", result.Errors[0].Message)
+	}
+}
+
 func TestImportServiceReturnsUnavailableAfterTwoBadReplies(t *testing.T) {
 	imports, _, _ := newImportServiceForTest(t, &stubImportLLM{replies: []string{"no", "still no"}})
 

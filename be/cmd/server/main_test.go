@@ -17,12 +17,14 @@ func TestNewServerSetsSecurityTimeouts(t *testing.T) {
 		t.Fatalf("expected read header timeout 5s, got %s", server.ReadHeaderTimeout)
 	}
 
-	if server.ReadTimeout != 10*time.Second {
-		t.Fatalf("expected read timeout 10s, got %s", server.ReadTimeout)
+	if server.ReadTimeout != 60*time.Second {
+		t.Fatalf("expected read timeout 60s, got %s", server.ReadTimeout)
 	}
 
-	if server.WriteTimeout != 10*time.Second {
-		t.Fatalf("expected write timeout 10s, got %s", server.WriteTimeout)
+	// The write timeout must exceed the LLM timeout because chat handlers wait
+	// on a model call before they can write the response.
+	if server.WriteTimeout != 300*time.Second {
+		t.Fatalf("expected write timeout 300s, got %s", server.WriteTimeout)
 	}
 
 	if server.IdleTimeout != 60*time.Second {

@@ -63,6 +63,11 @@ func (f *fakeAccountRepo) GetByID(ctx context.Context, id uuid.UUID) (*model.Acc
 	if f.account != nil {
 		return f.account, nil
 	}
+	for _, account := range f.accounts {
+		if account.ID == id {
+			return &account, nil
+		}
+	}
 	return nil, service.ErrAccountNotFound
 }
 
@@ -102,12 +107,21 @@ type fakeCategoryRepo struct {
 	getErr     error
 	listErr    error
 	createErr  error
+	updateErr  error
+	inUse      bool
+	inUseErr   error
 	deleteErr  error
 	deleted    []uuid.UUID
 	lastCreate struct {
 		userID uuid.UUID
 		name   string
 		typ    string
+		color  string
+	}
+	lastUpdate struct {
+		userID uuid.UUID
+		id     uuid.UUID
+		name   string
 		color  string
 	}
 }
@@ -140,32 +154,59 @@ func (f *fakeCategoryRepo) ListByUser(ctx context.Context, userID uuid.UUID) ([]
 	return f.categories, nil
 }
 
+func (f *fakeCategoryRepo) UpdateCategory(ctx context.Context, userID uuid.UUID, id uuid.UUID, name string, color string) (model.Category, error) {
+	f.lastUpdate.userID = userID
+	f.lastUpdate.id = id
+	f.lastUpdate.name = name
+	f.lastUpdate.color = color
+	if f.updateErr != nil {
+		return model.Category{}, f.updateErr
+	}
+	return model.Category{ID: id, UserID: userID, Name: name, Type: service.TypeExpense, Color: color}, nil
+}
+
+func (f *fakeCategoryRepo) CategoryHasTransactions(ctx context.Context, userID uuid.UUID, categoryID uuid.UUID) (bool, error) {
+	if f.inUseErr != nil {
+		return false, f.inUseErr
+	}
+	return f.inUse, nil
+}
+
 func (f *fakeCategoryRepo) Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
 	f.deleted = append(f.deleted, id)
 	return f.deleteErr
 }
 
 type fakeTransactionRepo struct {
-	created     *model.Transaction
-	transaction *model.Transaction
-	updated     *model.Transaction
-	list        []model.Transaction
-	total       int
-	monthly     []model.MonthlyCurrencyTotal
-	createErr   error
-	getErr      error
-	listErr     error
-	updateErr   error
-	deleteErr   error
-	monthlyErr  error
-	exportErr   error
-	batchErr    error
-	exportRows  []model.TransactionExportRow
-	lastBatch   []model.Transaction
-	lastUpdated model.Transaction
-	deleted     []uuid.UUID
-	lastFilters model.TransactionFilters
-	lastCreated model.Transaction
+	created           *model.Transaction
+	transaction       *model.Transaction
+	updated           *model.Transaction
+	list              []model.Transaction
+	total             int
+	monthly           []model.MonthlyCurrencyTotal
+	createErr         error
+	getErr            error
+	listErr           error
+	updateErr         error
+	deleteErr         error
+	monthlyErr        error
+	exportErr         error
+	batchErr          error
+	exportRows        []model.TransactionExportRow
+	lastBatch         []model.Transaction
+	lastUpdated       model.Transaction
+	deleted           []uuid.UUID
+	lastFilters       model.TransactionFilters
+	lastCreated       model.Transaction
+	transfer          *model.TransferResult
+	transferErr       error
+	lastTransfer      model.CreateTransferRequest
+	lastTransferGroup uuid.UUID
+	deleteTransferErr error
+	fingerprints      []model.TransactionFingerprint
+	fingerprintErr    error
+	fingerprintFrom   time.Time
+	fingerprintTo     time.Time
 }
 
 func (f *fakeTransactionRepo) Create(ctx context.Context, tx model.Transaction) (*model.Transaction, error) {
@@ -216,6 +257,15 @@ func (f *fakeTransactionRepo) CreateBatch(ctx context.Context, userID uuid.UUID,
 	return f.batchErr
 }
 
+func (f *fakeTransactionRepo) FingerprintCandidates(ctx context.Context, userID uuid.UUID, from, to time.Time) ([]model.TransactionFingerprint, error) {
+	f.fingerprintFrom = from
+	f.fingerprintTo = to
+	if f.fingerprintErr != nil {
+		return nil, f.fingerprintErr
+	}
+	return f.fingerprints, nil
+}
+
 func (f *fakeTransactionRepo) Update(ctx context.Context, userID uuid.UUID, transaction model.Transaction) (*model.Transaction, error) {
 	f.lastUpdated = transaction
 	if f.updateErr != nil {
@@ -230,6 +280,22 @@ func (f *fakeTransactionRepo) Update(ctx context.Context, userID uuid.UUID, tran
 func (f *fakeTransactionRepo) Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
 	f.deleted = append(f.deleted, id)
 	return f.deleteErr
+}
+
+func (f *fakeTransactionRepo) CreateTransfer(ctx context.Context, userID uuid.UUID, req model.CreateTransferRequest) (*model.TransferResult, error) {
+	f.lastTransfer = req
+	if f.transferErr != nil {
+		return nil, f.transferErr
+	}
+	if f.transfer != nil {
+		return f.transfer, nil
+	}
+	return &model.TransferResult{TransferGroupID: uuid.New()}, nil
+}
+
+func (f *fakeTransactionRepo) DeleteTransfer(ctx context.Context, userID uuid.UUID, groupID uuid.UUID) error {
+	f.lastTransferGroup = groupID
+	return f.deleteTransferErr
 }
 
 func (f *fakeTransactionRepo) MonthlyTotalsByCurrency(ctx context.Context, userID uuid.UUID, month time.Time) ([]model.MonthlyCurrencyTotal, error) {
@@ -485,6 +551,148 @@ func TestCategoryServiceCreateCategoryReturnsNameExists(t *testing.T) {
 	})
 	if !errors.Is(err, service.ErrCategoryNameExists) {
 		t.Fatalf("expected ErrCategoryNameExists, got %v", err)
+	}
+}
+
+func TestCategoryServiceUpdateCategoryRenames(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	categoryID := uuid.New()
+	repo := &fakeCategoryRepo{
+		category: &model.Category{ID: categoryID, UserID: userID, Name: "Old", Type: service.TypeExpense, Color: "#111111"},
+	}
+	categories := service.NewCategoryService(repo)
+
+	name := "  Groceries  "
+	updated, err := categories.UpdateCategory(context.Background(), userID, categoryID, model.UpdateCategoryRequest{Name: &name})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if repo.lastUpdate.name != "Groceries" {
+		t.Fatalf("expected trimmed name %q, got %q", "Groceries", repo.lastUpdate.name)
+	}
+	if repo.lastUpdate.color != "#111111" {
+		t.Fatalf("expected existing color to be preserved, got %q", repo.lastUpdate.color)
+	}
+	if repo.lastUpdate.userID != userID || repo.lastUpdate.id != categoryID {
+		t.Fatalf("expected scoped update for user %s category %s", userID, categoryID)
+	}
+	if updated.Name != "Groceries" {
+		t.Fatalf("expected updated category name, got %q", updated.Name)
+	}
+}
+
+func TestCategoryServiceUpdateCategoryDefaultsEmptyColor(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	categoryID := uuid.New()
+	repo := &fakeCategoryRepo{
+		category: &model.Category{ID: categoryID, UserID: userID, Name: "Groceries", Type: service.TypeExpense, Color: "#111111"},
+	}
+	categories := service.NewCategoryService(repo)
+
+	color := "  "
+	_, err := categories.UpdateCategory(context.Background(), userID, categoryID, model.UpdateCategoryRequest{Color: &color})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if repo.lastUpdate.color != service.DefaultCategoryColor {
+		t.Fatalf("expected default color %q, got %q", service.DefaultCategoryColor, repo.lastUpdate.color)
+	}
+}
+
+func TestCategoryServiceUpdateCategoryRejectsEmptyName(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	categoryID := uuid.New()
+	repo := &fakeCategoryRepo{
+		category: &model.Category{ID: categoryID, UserID: userID, Name: "Groceries", Type: service.TypeExpense},
+	}
+	categories := service.NewCategoryService(repo)
+
+	name := "   "
+	_, err := categories.UpdateCategory(context.Background(), userID, categoryID, model.UpdateCategoryRequest{Name: &name})
+	if !errors.Is(err, service.ErrInvalidName) {
+		t.Fatalf("expected ErrInvalidName, got %v", err)
+	}
+}
+
+func TestCategoryServiceUpdateCategoryNotFound(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	repo := &fakeCategoryRepo{category: &model.Category{ID: uuid.New(), UserID: uuid.New()}}
+	categories := service.NewCategoryService(repo)
+
+	name := "Groceries"
+	_, err := categories.UpdateCategory(context.Background(), userID, uuid.New(), model.UpdateCategoryRequest{Name: &name})
+	if !errors.Is(err, service.ErrCategoryNotFound) {
+		t.Fatalf("expected ErrCategoryNotFound, got %v", err)
+	}
+}
+
+func TestCategoryServiceUpdateCategoryReturnsNameExists(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	categoryID := uuid.New()
+	repo := &fakeCategoryRepo{
+		category:  &model.Category{ID: categoryID, UserID: userID, Name: "Groceries"},
+		updateErr: service.ErrCategoryNameExists,
+	}
+	categories := service.NewCategoryService(repo)
+
+	name := "Dining"
+	_, err := categories.UpdateCategory(context.Background(), userID, categoryID, model.UpdateCategoryRequest{Name: &name})
+	if !errors.Is(err, service.ErrCategoryNameExists) {
+		t.Fatalf("expected ErrCategoryNameExists, got %v", err)
+	}
+}
+
+func TestCategoryServiceDeleteCategoryRejectsInUse(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeCategoryRepo{inUse: true}
+	categories := service.NewCategoryService(repo)
+
+	err := categories.DeleteCategory(context.Background(), uuid.New(), uuid.New())
+	if !errors.Is(err, service.ErrCategoryInUse) {
+		t.Fatalf("expected ErrCategoryInUse, got %v", err)
+	}
+	if len(repo.deleted) != 0 {
+		t.Fatalf("expected no delete when the category is in use, got %v", repo.deleted)
+	}
+}
+
+func TestCategoryServiceDeleteCategoryDeletesUnused(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	categoryID := uuid.New()
+	repo := &fakeCategoryRepo{}
+	categories := service.NewCategoryService(repo)
+
+	if err := categories.DeleteCategory(context.Background(), userID, categoryID); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(repo.deleted) != 1 || repo.deleted[0] != categoryID {
+		t.Fatalf("expected category %s to be deleted, got %v", categoryID, repo.deleted)
+	}
+}
+
+func TestCategoryServiceDeleteCategoryNotFound(t *testing.T) {
+	t.Parallel()
+
+	repo := &fakeCategoryRepo{deleteErr: service.ErrCategoryNotFound}
+	categories := service.NewCategoryService(repo)
+
+	err := categories.DeleteCategory(context.Background(), uuid.New(), uuid.New())
+	if !errors.Is(err, service.ErrCategoryNotFound) {
+		t.Fatalf("expected ErrCategoryNotFound, got %v", err)
 	}
 }
 
@@ -981,7 +1189,7 @@ func TestTransactionServiceImportTransactionsCreatesBatch(t *testing.T) {
 
 	body := "date,type,amount,description,account,category\n2026-10-01,expense,12.50,Coffee,Cash,Food\n"
 
-	result, err := transactions.ImportTransactions(context.Background(), userID, strings.NewReader(body))
+	result, err := transactions.ImportTransactions(context.Background(), userID, strings.NewReader(body), false)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -1107,5 +1315,168 @@ func TestTransactionServiceDeleteTransactionNotFound(t *testing.T) {
 	err := transactions.DeleteTransaction(context.Background(), uuid.New(), uuid.New())
 	if !errors.Is(err, service.ErrTransactionNotFound) {
 		t.Fatalf("expected ErrTransactionNotFound, got %v", err)
+	}
+}
+
+func TestTransactionServiceCreateTransferCreatesPair(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	fromID := uuid.New()
+	toID := uuid.New()
+	repo := &fakeTransactionRepo{}
+	accounts := &fakeAccountRepo{accounts: []model.Account{
+		{ID: fromID, UserID: userID, Currency: "USD"},
+		{ID: toID, UserID: userID, Currency: "USD"},
+	}}
+	transactions := service.NewTransactionService(repo, accounts, &fakeCategoryRepo{})
+
+	transfer, err := transactions.CreateTransfer(context.Background(), userID, model.CreateTransferRequest{
+		FromAccountID: fromID,
+		ToAccountID:   toID,
+		Amount:        100,
+		Date:          "2026-11-08",
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if transfer == nil || transfer.TransferGroupID == uuid.Nil {
+		t.Fatalf("expected a transfer group id, got %+v", transfer)
+	}
+	if repo.lastTransfer.Date != "2026-11-08" {
+		t.Fatalf("expected date %q forwarded, got %q", "2026-11-08", repo.lastTransfer.Date)
+	}
+}
+
+func TestTransactionServiceCreateTransferRejectsSameAccount(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	accountID := uuid.New()
+	accounts := &fakeAccountRepo{accounts: []model.Account{
+		{ID: accountID, UserID: userID, Currency: "USD"},
+	}}
+	transactions := service.NewTransactionService(&fakeTransactionRepo{}, accounts, &fakeCategoryRepo{})
+
+	_, err := transactions.CreateTransfer(context.Background(), userID, model.CreateTransferRequest{
+		FromAccountID: accountID,
+		ToAccountID:   accountID,
+		Amount:        100,
+		Date:          "2026-11-08",
+	})
+	if !errors.Is(err, service.ErrSameAccount) {
+		t.Fatalf("expected ErrSameAccount, got %v", err)
+	}
+}
+
+func TestTransactionServiceCreateTransferRejectsCrossCurrency(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	fromID := uuid.New()
+	toID := uuid.New()
+	accounts := &fakeAccountRepo{accounts: []model.Account{
+		{ID: fromID, UserID: userID, Currency: "USD"},
+		{ID: toID, UserID: userID, Currency: "IDR"},
+	}}
+	transactions := service.NewTransactionService(&fakeTransactionRepo{}, accounts, &fakeCategoryRepo{})
+
+	_, err := transactions.CreateTransfer(context.Background(), userID, model.CreateTransferRequest{
+		FromAccountID: fromID,
+		ToAccountID:   toID,
+		Amount:        100,
+		Date:          "2026-11-08",
+	})
+	if !errors.Is(err, service.ErrTransferCurrencyMismatch) {
+		t.Fatalf("expected ErrTransferCurrencyMismatch, got %v", err)
+	}
+}
+
+func TestTransactionServiceCreateTransferRejectsUnknownAccount(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	knownID := uuid.New()
+	accounts := &fakeAccountRepo{accounts: []model.Account{
+		{ID: knownID, UserID: userID, Currency: "USD"},
+	}}
+	transactions := service.NewTransactionService(&fakeTransactionRepo{}, accounts, &fakeCategoryRepo{})
+
+	_, err := transactions.CreateTransfer(context.Background(), userID, model.CreateTransferRequest{
+		FromAccountID: knownID,
+		ToAccountID:   uuid.New(),
+		Amount:        100,
+		Date:          "2026-11-08",
+	})
+	if !errors.Is(err, service.ErrAccountNotFound) {
+		t.Fatalf("expected ErrAccountNotFound, got %v", err)
+	}
+}
+
+func TestTransactionServiceCreateTransferRejectsInvalidInput(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	fromID := uuid.New()
+	toID := uuid.New()
+	accounts := &fakeAccountRepo{accounts: []model.Account{
+		{ID: fromID, UserID: userID, Currency: "USD"},
+		{ID: toID, UserID: userID, Currency: "USD"},
+	}}
+
+	tests := []struct {
+		name   string
+		amount float64
+		date   string
+		want   error
+	}{
+		{"zero amount", 0, "2026-11-08", service.ErrInvalidAmount},
+		{"negative amount", -10, "2026-11-08", service.ErrInvalidAmount},
+		{"bad date", 100, "08/11/2026", service.ErrInvalidDate},
+		{"empty date", 100, "", service.ErrInvalidDate},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			transactions := service.NewTransactionService(&fakeTransactionRepo{}, accounts, &fakeCategoryRepo{})
+			_, err := transactions.CreateTransfer(context.Background(), userID, model.CreateTransferRequest{
+				FromAccountID: fromID,
+				ToAccountID:   toID,
+				Amount:        test.amount,
+				Date:          test.date,
+			})
+			if !errors.Is(err, test.want) {
+				t.Fatalf("expected %v, got %v", test.want, err)
+			}
+		})
+	}
+}
+
+func TestTransactionServiceDeleteTransferNotFound(t *testing.T) {
+	t.Parallel()
+
+	transactions := service.NewTransactionService(
+		&fakeTransactionRepo{deleteTransferErr: service.ErrTransferNotFound},
+		&fakeAccountRepo{},
+		&fakeCategoryRepo{},
+	)
+
+	err := transactions.DeleteTransfer(context.Background(), uuid.New(), uuid.New())
+	if !errors.Is(err, service.ErrTransferNotFound) {
+		t.Fatalf("expected ErrTransferNotFound, got %v", err)
+	}
+}
+
+func TestAccountServiceDeleteAccountWithTransferLeg(t *testing.T) {
+	t.Parallel()
+
+	accounts := service.NewAccountService(&fakeAccountRepo{deleteErr: service.ErrAccountHasTransfers})
+
+	err := accounts.DeleteAccount(context.Background(), uuid.New(), uuid.New())
+	if !errors.Is(err, service.ErrAccountHasTransfers) {
+		t.Fatalf("expected ErrAccountHasTransfers, got %v", err)
 	}
 }

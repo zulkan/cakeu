@@ -107,9 +107,11 @@ type fakeCategoryService struct {
 	categories []model.Category
 	category   *model.Category
 	err        error
+	updateErr  error
 	lastUserID uuid.UUID
 	lastID     uuid.UUID
 	lastCreate model.CreateCategoryRequest
+	lastUpdate model.UpdateCategoryRequest
 }
 
 func (f *fakeCategoryService) CreateCategory(ctx context.Context, userID uuid.UUID, req model.CreateCategoryRequest) (*model.Category, error) {
@@ -140,6 +142,19 @@ func (f *fakeCategoryService) ListCategories(ctx context.Context, userID uuid.UU
 	return f.categories, nil
 }
 
+func (f *fakeCategoryService) UpdateCategory(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.UpdateCategoryRequest) (*model.Category, error) {
+	f.lastUserID = userID
+	f.lastID = id
+	f.lastUpdate = req
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
+	if f.category != nil {
+		return f.category, nil
+	}
+	return &model.Category{ID: id, UserID: userID}, nil
+}
+
 func (f *fakeCategoryService) DeleteCategory(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
 	f.lastUserID = userID
 	f.lastID = id
@@ -147,17 +162,20 @@ func (f *fakeCategoryService) DeleteCategory(ctx context.Context, userID uuid.UU
 }
 
 type fakeTransactionService struct {
-	transaction  *model.Transaction
-	paginated    *model.PaginatedTransactions
-	summary      *model.DashboardSummary
-	err          error
-	lastUserID   uuid.UUID
-	lastID       uuid.UUID
-	lastFilters  model.TransactionFilters
-	lastCreate   model.CreateTransactionRequest
-	lastUpdate   model.UpdateTransactionRequest
-	exportRows   []model.TransactionExportRow
-	importResult *model.ImportResult
+	transaction       *model.Transaction
+	paginated         *model.PaginatedTransactions
+	summary           *model.DashboardSummary
+	err               error
+	lastUserID        uuid.UUID
+	lastID            uuid.UUID
+	lastFilters       model.TransactionFilters
+	lastCreate        model.CreateTransactionRequest
+	lastUpdate        model.UpdateTransactionRequest
+	exportRows        []model.TransactionExportRow
+	importResult      *model.ImportResult
+	transfer          *model.TransferResult
+	lastTransfer      model.CreateTransferRequest
+	lastTransferGroup uuid.UUID
 }
 
 func (f *fakeTransactionService) CreateTransaction(ctx context.Context, userID uuid.UUID, req model.CreateTransactionRequest) (*model.Transaction, error) {
@@ -217,7 +235,7 @@ func (f *fakeTransactionService) PreviewImport(ctx context.Context, userID uuid.
 	return &model.ImportResult{Errors: []model.ImportRowError{}, Preview: []model.ImportPreviewRow{}}, nil
 }
 
-func (f *fakeTransactionService) ImportTransactions(ctx context.Context, userID uuid.UUID, r io.Reader) (*model.ImportResult, error) {
+func (f *fakeTransactionService) ImportTransactions(ctx context.Context, userID uuid.UUID, r io.Reader, allowDuplicates bool) (*model.ImportResult, error) {
 	f.lastUserID = userID
 	if f.err != nil {
 		return nil, f.err
@@ -244,6 +262,24 @@ func (f *fakeTransactionService) UpdateTransaction(ctx context.Context, userID u
 func (f *fakeTransactionService) DeleteTransaction(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
 	f.lastUserID = userID
 	f.lastID = id
+	return f.err
+}
+
+func (f *fakeTransactionService) CreateTransfer(ctx context.Context, userID uuid.UUID, req model.CreateTransferRequest) (*model.TransferResult, error) {
+	f.lastUserID = userID
+	f.lastTransfer = req
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.transfer != nil {
+		return f.transfer, nil
+	}
+	return &model.TransferResult{TransferGroupID: uuid.New()}, nil
+}
+
+func (f *fakeTransactionService) DeleteTransfer(ctx context.Context, userID uuid.UUID, groupID uuid.UUID) error {
+	f.lastUserID = userID
+	f.lastTransferGroup = groupID
 	return f.err
 }
 
@@ -295,11 +331,11 @@ func newTestHandler(accounts *fakeAccountService, categories *fakeCategoryServic
 }
 
 func newTestHandlerWithImports(accounts *fakeAccountService, categories *fakeCategoryService, transactions *fakeTransactionService, imports httpserver.ImportService, origins []string) http.Handler {
-	return httpserver.NewHandler(service.NewHealth(nil), nil, accounts, categories, transactions, imports, service.ImportModeAI, nil, nil, nil, nil, testJWTSecret, origins)
+	return httpserver.NewHandler(service.NewHealth(nil), nil, accounts, categories, transactions, imports, service.ImportModeAI, nil, nil, nil, nil, nil, testJWTSecret, origins)
 }
 
 func newTestHandlerWithImportMode(imports httpserver.ImportService, importMode service.ImportMode, origins []string) http.Handler {
-	return httpserver.NewHandler(service.NewHealth(nil), nil, &fakeAccountService{}, &fakeCategoryService{}, &fakeTransactionService{}, imports, importMode, nil, nil, nil, nil, testJWTSecret, origins)
+	return httpserver.NewHandler(service.NewHealth(nil), nil, &fakeAccountService{}, &fakeCategoryService{}, &fakeTransactionService{}, imports, importMode, nil, nil, nil, nil, nil, testJWTSecret, origins)
 }
 
 func signToken(t *testing.T, secret string, userID uuid.UUID) string {
@@ -356,6 +392,8 @@ func TestFinanceEndpointsRequireAuth(t *testing.T) {
 		{http.MethodGet, "/api/transactions"},
 		{http.MethodPost, "/api/transactions"},
 		{http.MethodDelete, "/api/transactions/" + id},
+		{http.MethodPost, "/api/transfers"},
+		{http.MethodDelete, "/api/transfers/" + id},
 		{http.MethodGet, "/api/dashboard/summary"},
 	}
 
@@ -1186,6 +1224,24 @@ func TestImportTransactionsHonorsStrictMode(t *testing.T) {
 	}
 }
 
+func TestImportTransactionsForwardsAllowDuplicates(t *testing.T) {
+	t.Parallel()
+
+	imports := &fakeImportService{result: &model.ImportResult{Total: 1, Valid: 1, Mode: "strict"}}
+	handler := newTestHandlerWithImports(&fakeAccountService{}, &fakeCategoryService{}, &fakeTransactionService{}, imports, nil)
+
+	recorder := doMultipartUpload(t, handler, "/api/transactions/import", signToken(t, testJWTSecret, uuid.New()), "transactions.csv",
+		[]byte("date,type,amount,description,account,category\n2026-10-01,expense,12.50,Coffee,Cash,Food\n"),
+		map[string]string{"confirm": "true", "mode": "strict", "allow_duplicates": "true"})
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+	if !imports.lastOptions.AllowDuplicates {
+		t.Fatalf("expected allow_duplicates to be forwarded, got %+v", imports.lastOptions)
+	}
+}
+
 func TestPreviewImportMapsMissingColumnsTo400(t *testing.T) {
 	t.Parallel()
 
@@ -1263,5 +1319,207 @@ func TestPreviewImportParsesXLSXThroughHandler(t *testing.T) {
 	}
 	if len(imports.lastSheets) != 1 || imports.lastSheets[0] != sheet {
 		t.Fatalf("expected the sheet list, got %v", imports.lastSheets)
+	}
+}
+
+func TestUpdateCategoryRenames(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	categoryID := uuid.New()
+	categories := &fakeCategoryService{category: &model.Category{ID: categoryID, UserID: userID, Name: "Groceries"}}
+	handler := newTestHandler(&fakeAccountService{}, categories, &fakeTransactionService{}, nil)
+
+	recorder := doRequest(t, handler, http.MethodPatch, "/api/categories/"+categoryID.String(), signToken(t, testJWTSecret, userID),
+		`{"name":"Dining"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+	if categories.lastUserID != userID || categories.lastID != categoryID {
+		t.Fatalf("expected update scoped to user %s category %s", userID, categoryID)
+	}
+	if categories.lastUpdate.Name == nil || *categories.lastUpdate.Name != "Dining" {
+		t.Fatalf("expected name %q, got %v", "Dining", categories.lastUpdate.Name)
+	}
+}
+
+func TestUpdateCategoryNotFound(t *testing.T) {
+	t.Parallel()
+
+	categories := &fakeCategoryService{updateErr: service.ErrCategoryNotFound}
+	handler := newTestHandler(&fakeAccountService{}, categories, &fakeTransactionService{}, nil)
+
+	recorder := doRequest(t, handler, http.MethodPatch, "/api/categories/"+uuid.New().String(), signToken(t, testJWTSecret, uuid.New()),
+		`{"name":"Dining"}`)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestUpdateCategoryRejectsTypeChange(t *testing.T) {
+	t.Parallel()
+
+	categories := &fakeCategoryService{}
+	handler := newTestHandler(&fakeAccountService{}, categories, &fakeTransactionService{}, nil)
+
+	recorder := doRequest(t, handler, http.MethodPatch, "/api/categories/"+uuid.New().String(), signToken(t, testJWTSecret, uuid.New()),
+		`{"type":"income"}`)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "type") {
+		t.Fatalf("expected the error to mention type, got %q", recorder.Body.String())
+	}
+}
+
+func TestUpdateCategoryNameConflictIs409(t *testing.T) {
+	t.Parallel()
+
+	categories := &fakeCategoryService{updateErr: service.ErrCategoryNameExists}
+	handler := newTestHandler(&fakeAccountService{}, categories, &fakeTransactionService{}, nil)
+
+	recorder := doRequest(t, handler, http.MethodPatch, "/api/categories/"+uuid.New().String(), signToken(t, testJWTSecret, uuid.New()),
+		`{"name":"Dining"}`)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestDeleteCategoryInUseIs409(t *testing.T) {
+	t.Parallel()
+
+	categories := &fakeCategoryService{err: service.ErrCategoryInUse}
+	handler := newTestHandler(&fakeAccountService{}, categories, &fakeTransactionService{}, nil)
+
+	recorder := doRequest(t, handler, http.MethodDelete, "/api/categories/"+uuid.New().String(), signToken(t, testJWTSecret, uuid.New()), "")
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestDeleteUnusedCategorySucceeds(t *testing.T) {
+	t.Parallel()
+
+	categoryID := uuid.New()
+	categories := &fakeCategoryService{}
+	handler := newTestHandler(&fakeAccountService{}, categories, &fakeTransactionService{}, nil)
+
+	recorder := doRequest(t, handler, http.MethodDelete, "/api/categories/"+categoryID.String(), signToken(t, testJWTSecret, uuid.New()), "")
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+	if categories.lastID != categoryID {
+		t.Fatalf("expected category %s to be deleted, got %s", categoryID, categories.lastID)
+	}
+}
+
+func TestCreateTransfer(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	fromID := uuid.New()
+	toID := uuid.New()
+	groupID := uuid.New()
+	transactions := &fakeTransactionService{transfer: &model.TransferResult{
+		TransferGroupID: groupID,
+		From:            model.Transaction{AccountID: fromID, Type: service.TypeExpense, Amount: 100},
+		To:              model.Transaction{AccountID: toID, Type: service.TypeIncome, Amount: 100},
+	}}
+	handler := newTestHandler(&fakeAccountService{}, &fakeCategoryService{}, transactions, nil)
+
+	recorder := doRequest(t, handler, http.MethodPost, "/api/transfers", signToken(t, testJWTSecret, userID),
+		`{"from_account_id":"`+fromID.String()+`","to_account_id":"`+toID.String()+`","amount":100,"date":"2026-11-08"}`)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+	if transactions.lastUserID != userID {
+		t.Fatalf("expected caller %s forwarded, got %s", userID, transactions.lastUserID)
+	}
+	if transactions.lastTransfer.FromAccountID != fromID || transactions.lastTransfer.ToAccountID != toID {
+		t.Fatalf("unexpected transfer request: %+v", transactions.lastTransfer)
+	}
+
+	var response model.TransferResult
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("expected JSON transfer result, got error: %v", err)
+	}
+	if response.TransferGroupID != groupID {
+		t.Fatalf("expected group id %s, got %s", groupID, response.TransferGroupID)
+	}
+}
+
+func TestDeleteTransfer(t *testing.T) {
+	t.Parallel()
+
+	userID := uuid.New()
+	groupID := uuid.New()
+	transactions := &fakeTransactionService{}
+	handler := newTestHandler(&fakeAccountService{}, &fakeCategoryService{}, transactions, nil)
+
+	recorder := doRequest(t, handler, http.MethodDelete, "/api/transfers/"+groupID.String(), signToken(t, testJWTSecret, userID), "")
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("expected status 204, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+	if transactions.lastTransferGroup != groupID {
+		t.Fatalf("expected group id %s forwarded, got %s", groupID, transactions.lastTransferGroup)
+	}
+	if transactions.lastUserID != userID {
+		t.Fatalf("expected caller %s forwarded, got %s", userID, transactions.lastUserID)
+	}
+}
+
+func TestCreateTransferMapsErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{"same account", service.ErrSameAccount, http.StatusBadRequest},
+		{"currency mismatch", service.ErrTransferCurrencyMismatch, http.StatusBadRequest},
+		{"invalid amount", service.ErrInvalidAmount, http.StatusBadRequest},
+		{"invalid date", service.ErrInvalidDate, http.StatusBadRequest},
+		{"unknown account", service.ErrAccountNotFound, http.StatusNotFound},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			transactions := &fakeTransactionService{err: test.err}
+			handler := newTestHandler(&fakeAccountService{}, &fakeCategoryService{}, transactions, nil)
+
+			recorder := doRequest(t, handler, http.MethodPost, "/api/transfers", signToken(t, testJWTSecret, uuid.New()),
+				`{"from_account_id":"`+uuid.New().String()+`","to_account_id":"`+uuid.New().String()+`","amount":100,"date":"2026-11-08"}`)
+			if recorder.Code != test.status {
+				t.Fatalf("expected status %d, got %d with body %q", test.status, recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestDeleteTransferNotFound(t *testing.T) {
+	t.Parallel()
+
+	transactions := &fakeTransactionService{err: service.ErrTransferNotFound}
+	handler := newTestHandler(&fakeAccountService{}, &fakeCategoryService{}, transactions, nil)
+
+	recorder := doRequest(t, handler, http.MethodDelete, "/api/transfers/"+uuid.New().String(), signToken(t, testJWTSecret, uuid.New()), "")
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d with body %q", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestDeleteAccountWithTransferLegReturnsConflict(t *testing.T) {
+	t.Parallel()
+
+	accounts := &fakeAccountService{err: service.ErrAccountHasTransfers}
+	handler := newTestHandler(accounts, &fakeCategoryService{}, &fakeTransactionService{}, nil)
+
+	recorder := doRequest(t, handler, http.MethodDelete, "/api/accounts/"+uuid.New().String(), signToken(t, testJWTSecret, uuid.New()), "")
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected status 409, got %d with body %q", recorder.Code, recorder.Body.String())
 	}
 }

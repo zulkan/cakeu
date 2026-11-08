@@ -64,13 +64,20 @@ func (s *reportService) Categories(ctx context.Context, userID uuid.UUID, from, 
 		return nil, fmt.Errorf("category report: %w", err)
 	}
 
-	byType := make(map[string]float64, 2)
+	// Share is computed within each (currency, type) group: a USD category is
+	// never compared against an IDR category's total.
+	type shareKey struct {
+		currency string
+		kind     string
+	}
+	byGroup := make(map[shareKey]float64, 2)
 	for _, total := range totals {
-		byType[total.Type] += total.Total
+		byGroup[shareKey{currency: total.Currency, kind: total.Type}] += total.Total
 	}
 
 	for i := range totals {
-		if sum := byType[totals[i].Type]; sum > 0 {
+		key := shareKey{currency: totals[i].Currency, kind: totals[i].Type}
+		if sum := byGroup[key]; sum > 0 {
 			totals[i].Share = totals[i].Total / sum * 100
 		}
 	}

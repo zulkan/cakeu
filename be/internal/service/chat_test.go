@@ -432,11 +432,11 @@ func (f *fakeBudgetService) List(ctx context.Context, userID uuid.UUID, month ti
 	return f.statuses, nil
 }
 
-func (f *fakeBudgetService) Upsert(ctx context.Context, userID, categoryID uuid.UUID, month time.Time, amount float64) (*model.Budget, error) {
-	return &model.Budget{CategoryID: categoryID, Month: month, Amount: amount}, nil
+func (f *fakeBudgetService) Upsert(ctx context.Context, userID, categoryID uuid.UUID, month time.Time, currency string, amount float64) (*model.Budget, error) {
+	return &model.Budget{CategoryID: categoryID, Month: month, Currency: currency, Amount: amount}, nil
 }
 
-func (f *fakeBudgetService) Delete(ctx context.Context, userID, categoryID uuid.UUID, month time.Time) error {
+func (f *fakeBudgetService) Delete(ctx context.Context, userID, categoryID uuid.UUID, month time.Time, currency string) error {
 	return nil
 }
 

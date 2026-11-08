@@ -47,6 +47,11 @@ type ResetPasswordRequest struct {
 	Password string `json:"password" example:"NewSecureP@ssw0rd"`
 }
 
+type ChangePasswordRequest struct {
+	CurrentPassword string `json:"current_password" example:"OldSecureP@ssw0rd"`
+	NewPassword     string `json:"new_password" example:"NewSecureP@ssw0rd"`
+}
+
 type MessageResponse struct {
 	Message string `json:"message"`
 }

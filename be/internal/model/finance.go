@@ -28,19 +28,20 @@ type Category struct {
 }
 
 type Transaction struct {
-	ID           uuid.UUID `json:"id"`
-	UserID       uuid.UUID `json:"user_id"`
-	AccountID    uuid.UUID `json:"account_id"`
-	CategoryID   uuid.UUID `json:"category_id"`
-	Type         string    `json:"type"`
-	Amount       float64   `json:"amount"`
-	Description  string    `json:"description"`
-	Date         time.Time `json:"date"`
-	CreatedAt    time.Time `json:"created_at"`
-	AccountName  string    `json:"account_name"`
-	CategoryName string    `json:"category_name"`
-	Kind         string    `json:"kind"`
-	Currency     string    `json:"currency"`
+	ID              uuid.UUID `json:"id"`
+	UserID          uuid.UUID `json:"user_id"`
+	AccountID       uuid.UUID `json:"account_id"`
+	CategoryID      uuid.UUID `json:"category_id"`
+	TransferGroupID uuid.UUID `json:"transfer_group_id"`
+	Type            string    `json:"type"`
+	Amount          float64   `json:"amount"`
+	Description     string    `json:"description"`
+	Date            time.Time `json:"date"`
+	CreatedAt       time.Time `json:"created_at"`
+	AccountName     string    `json:"account_name"`
+	CategoryName    string    `json:"category_name"`
+	Kind            string    `json:"kind"`
+	Currency        string    `json:"currency"`
 }
 
 type TransactionExportRow struct {
@@ -65,6 +66,18 @@ type ImportPreviewRow struct {
 	Description string  `json:"description"`
 	Account     string  `json:"account"`
 	Category    string  `json:"category"`
+	Duplicate   bool    `json:"duplicate,omitempty"`
+}
+
+// TransactionFingerprint is the ledger side of deterministic import dedupe.
+// The service hashes the same fields from a parsed import row and looks for a
+// match in this set.
+type TransactionFingerprint struct {
+	Date        time.Time
+	Type        string
+	Amount      float64
+	Description string
+	AccountName string
 }
 
 type ImportFieldRule struct {
@@ -104,16 +117,19 @@ type ImportMapping struct {
 }
 
 type ImportResult struct {
-	Total   int                `json:"total"`
-	Valid   int                `json:"valid"`
-	Invalid int                `json:"invalid"`
-	Skipped int                `json:"skipped"`
-	Sheet   string             `json:"sheet"`
-	Sheets  []string           `json:"sheets"`
-	Mode    string             `json:"mode,omitempty"`
-	Mapping *ImportMapping     `json:"mapping,omitempty"`
-	Errors  []ImportRowError   `json:"errors"`
-	Preview []ImportPreviewRow `json:"preview"`
+	Total          int                `json:"total"`
+	Valid          int                `json:"valid"`
+	Invalid        int                `json:"invalid"`
+	Skipped        int                `json:"skipped"`
+	Imported       int                `json:"imported"`
+	DuplicateCount int                `json:"duplicate_count"`
+	Sheet          string             `json:"sheet"`
+	Sheets         []string           `json:"sheets"`
+	Mode           string             `json:"mode,omitempty"`
+	Mapping        *ImportMapping     `json:"mapping,omitempty"`
+	Errors         []ImportRowError   `json:"errors"`
+	Duplicates     []ImportRowError   `json:"duplicates"`
+	Preview        []ImportPreviewRow `json:"preview"`
 }
 
 type CreateAccountRequest struct {
@@ -143,6 +159,14 @@ type CreateCategoryRequest struct {
 	Color string `json:"color" example:"#FB923C"`
 }
 
+// UpdateCategoryRequest is a partial rename/recolor. Type is decoded only so
+// the handler can reject a category type change with 400; it is never applied.
+type UpdateCategoryRequest struct {
+	Name  *string `json:"name,omitempty" example:"Groceries"`
+	Color *string `json:"color,omitempty" example:"#FB923C"`
+	Type  *string `json:"type,omitempty" example:"expense"`
+}
+
 type CreateTransactionRequest struct {
 	AccountID   uuid.UUID `json:"account_id" example:"00000000-0000-0000-0000-000000000000"`
 	CategoryID  uuid.UUID `json:"category_id" example:"00000000-0000-0000-0000-000000000000"`
@@ -150,6 +174,23 @@ type CreateTransactionRequest struct {
 	Amount      float64   `json:"amount" example:"42.50"`
 	Description string    `json:"description" example:"Weekly groceries"`
 	Date        time.Time `json:"date" example:"2026-10-25T00:00:00Z"`
+}
+
+// CreateTransferRequest moves money between two same-currency accounts of the
+// caller. Transfers are not created through the generic transaction endpoint.
+type CreateTransferRequest struct {
+	FromAccountID uuid.UUID `json:"from_account_id" example:"00000000-0000-0000-0000-000000000000"`
+	ToAccountID   uuid.UUID `json:"to_account_id" example:"00000000-0000-0000-0000-000000000000"`
+	Amount        float64   `json:"amount" example:"100.00"`
+	Date          string    `json:"date" example:"2026-11-08"`
+	Description   string    `json:"description,omitempty" example:"Move to savings"`
+}
+
+// TransferResult is the pair of ledger legs created by one transfer.
+type TransferResult struct {
+	TransferGroupID uuid.UUID   `json:"transfer_group_id"`
+	From            Transaction `json:"from"`
+	To              Transaction `json:"to"`
 }
 
 // UpdateTransactionRequest carries a partial transaction update. Omitted

@@ -1,11 +1,17 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 )
+
+// defaultJWTSecret is the historical placeholder. It must never reach a
+// running server because signing tokens with a public value is equivalent to
+// having no authentication at all.
+const defaultJWTSecret = "your-super-secret-jwt-key-change-in-production"
 
 type Config struct {
 	DatabaseURL  string
@@ -26,6 +32,10 @@ type Config struct {
 
 	SmartImportMode       string
 	SmartImportSampleRows int
+
+	AttachmentsDir string
+
+	Warnings []string
 }
 
 func Load() (*Config, error) {
@@ -73,7 +83,7 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		DatabaseURL:  databaseURL,
 		Port:         port,
-		JWTSecret:    getEnv("JWT_SECRET", "your-super-secret-jwt-key-change-in-production"),
+		JWTSecret:    os.Getenv("JWT_SECRET"),
 		SMTPHost:     getEnv("SMTP_HOST", "smtp.gmail.com"),
 		SMTPPort:     smtpPort,
 		SMTPUser:     os.Getenv("SMTP_USER"),
@@ -89,9 +99,31 @@ func Load() (*Config, error) {
 
 		SmartImportMode:       smartImportMode,
 		SmartImportSampleRows: smartImportSampleRows,
+
+		AttachmentsDir: getEnv("ATTACHMENTS_DIR", "./data/attachments"),
+	}
+
+	if err := validateJWTSecret(cfg); err != nil {
+		return nil, err
 	}
 
 	return cfg, nil
+}
+
+func validateJWTSecret(cfg *Config) error {
+	secret := strings.TrimSpace(cfg.JWTSecret)
+	if secret == "" {
+		return errors.New("JWT_SECRET must be set")
+	}
+	if secret == defaultJWTSecret {
+		return errors.New("JWT_SECRET must not use the default placeholder value")
+	}
+	if len(secret) < 32 {
+		cfg.Warnings = append(cfg.Warnings, "JWT_SECRET is shorter than 32 characters; use a longer random secret in production")
+	}
+	cfg.JWTSecret = secret
+
+	return nil
 }
 
 func getEnv(key, defaultValue string) string {

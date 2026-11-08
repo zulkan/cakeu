@@ -288,6 +288,9 @@ func RenumberImportResult(result *model.ImportResult, origins []int) {
 	for i := range result.Errors {
 		result.Errors[i].Row = remap(result.Errors[i].Row)
 	}
+	for i := range result.Duplicates {
+		result.Duplicates[i].Row = remap(result.Duplicates[i].Row)
+	}
 	for i := range result.Preview {
 		result.Preview[i].Row = remap(result.Preview[i].Row)
 	}

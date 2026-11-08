@@ -204,9 +204,10 @@ var chatTools = []llm.Tool{
 					"category":{"type":"string","description":"Exact category name"},
 					"type":{"type":"string","enum":["income","expense"],"description":"Disambiguates categories sharing a name"},
 					"month":{"type":"string","description":"YYYY-MM, defaults to the current month"},
+					"currency":{"type":"string","description":"3-letter currency code, e.g. USD"},
 					"amount":{"type":"number","exclusiveMinimum":0}
 				},
-				"required":["category","amount"],
+				"required":["category","currency","amount"],
 				"additionalProperties":false
 			}`),
 		},

@@ -21,6 +21,7 @@ func (s *ChatService) setBudget(ctx context.Context, userID uuid.UUID, rawArgs s
 		Category string  `json:"category"`
 		Type     string  `json:"type"`
 		Month    string  `json:"month"`
+		Currency string  `json:"currency"`
 		Amount   float64 `json:"amount"`
 	}
 	if err := decodeArgs(rawArgs, &args); err != nil {
@@ -37,7 +38,7 @@ func (s *ChatService) setBudget(ctx context.Context, userID uuid.UUID, rawArgs s
 		return "", "", nil, err
 	}
 
-	budget, err := s.budgets.Upsert(ctx, userID, category.ID, month, args.Amount)
+	budget, err := s.budgets.Upsert(ctx, userID, category.ID, month, args.Currency, args.Amount)
 	if err != nil {
 		return "", "", nil, err
 	}

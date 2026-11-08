@@ -12,6 +12,7 @@ type Budget struct {
 	CategoryID   uuid.UUID `json:"category_id"`
 	CategoryName string    `json:"category_name"`
 	Month        time.Time `json:"month"`
+	Currency     string    `json:"currency"`
 	Amount       float64   `json:"amount"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
@@ -20,6 +21,7 @@ type Budget struct {
 type BudgetStatus struct {
 	CategoryID   uuid.UUID `json:"category_id"`
 	CategoryName string    `json:"category_name"`
+	Currency     string    `json:"currency"`
 	Budget       float64   `json:"budget"`
 	Spent        float64   `json:"spent"`
 	Remaining    float64   `json:"remaining"`
@@ -29,5 +31,6 @@ type BudgetStatus struct {
 type UpsertBudgetRequest struct {
 	CategoryID uuid.UUID `json:"category_id"`
 	Month      string    `json:"month"`
+	Currency   string    `json:"currency"`
 	Amount     float64   `json:"amount"`
 }

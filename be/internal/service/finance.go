@@ -16,19 +16,25 @@ import (
 )
 
 var (
-	ErrAccountNotFound       = errors.New("account not found")
-	ErrCategoryNotFound      = errors.New("category not found")
-	ErrTransactionNotFound   = errors.New("transaction not found")
-	ErrAccountNameExists     = errors.New("account name already exists")
-	ErrCategoryNameExists    = errors.New("category name already exists")
-	ErrInvalidAmount         = errors.New("amount must be positive")
-	ErrInvalidType           = errors.New("type must be income or expense")
-	ErrInvalidName           = errors.New("name is required")
-	ErrInvalidCurrency       = errors.New("currency must be a 3-letter code")
-	ErrUseAdjustmentEndpoint = errors.New("use the account adjustment endpoint to change a balance")
-	ErrCurrencyLocked        = errors.New("currency is locked after the first entry")
-	ErrSystemEntryImmutable  = errors.New("system entries cannot be modified")
-	ErrInvalidBalance        = errors.New("balance must be a finite number")
+	ErrAccountNotFound          = errors.New("account not found")
+	ErrCategoryNotFound         = errors.New("category not found")
+	ErrTransactionNotFound      = errors.New("transaction not found")
+	ErrAccountNameExists        = errors.New("account name already exists")
+	ErrCategoryNameExists       = errors.New("category name already exists")
+	ErrCategoryInUse            = errors.New("category has transactions and cannot be deleted")
+	ErrInvalidAmount            = errors.New("amount must be positive")
+	ErrInvalidType              = errors.New("type must be income or expense")
+	ErrInvalidName              = errors.New("name is required")
+	ErrInvalidCurrency          = errors.New("currency must be a 3-letter code")
+	ErrUseAdjustmentEndpoint    = errors.New("use the account adjustment endpoint to change a balance")
+	ErrCurrencyLocked           = errors.New("currency is locked after the first entry")
+	ErrSystemEntryImmutable     = errors.New("system entries cannot be modified")
+	ErrInvalidBalance           = errors.New("balance must be a finite number")
+	ErrSameAccount              = errors.New("cannot transfer to the same account")
+	ErrTransferCurrencyMismatch = errors.New("transfer accounts must use the same currency")
+	ErrTransferNotFound         = errors.New("transfer not found")
+	ErrAccountHasTransfers      = errors.New("account has transfers and cannot be deleted")
+	ErrInvalidDate              = errors.New("date must be in YYYY-MM-DD format")
 )
 
 const (
@@ -43,6 +49,8 @@ const (
 	EntryKindOpening = "opening"
 	// EntryKindAdjustment is a locked correction to a real-world balance.
 	EntryKindAdjustment = "adjustment"
+	// EntryKindTransfer is one leg of a paired account-to-account movement.
+	EntryKindTransfer = "transfer"
 
 	// DefaultCurrency is used when a request omits a currency.
 	DefaultCurrency = "USD"
@@ -68,6 +76,8 @@ type CategoryRepository interface {
 	Create(ctx context.Context, userID uuid.UUID, name string, type_ string, color string) (*model.Category, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*model.Category, error)
 	ListByUser(ctx context.Context, userID uuid.UUID) ([]model.Category, error)
+	UpdateCategory(ctx context.Context, userID uuid.UUID, id uuid.UUID, name string, color string) (model.Category, error)
+	CategoryHasTransactions(ctx context.Context, userID uuid.UUID, categoryID uuid.UUID) (bool, error)
 	Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
 }
 
@@ -77,8 +87,11 @@ type TransactionRepository interface {
 	List(ctx context.Context, filters model.TransactionFilters) ([]model.Transaction, int, error)
 	ForEachExportRow(ctx context.Context, filters model.TransactionFilters, emit func(model.TransactionExportRow) error) error
 	CreateBatch(ctx context.Context, userID uuid.UUID, transactions []model.Transaction) error
+	FingerprintCandidates(ctx context.Context, userID uuid.UUID, from, to time.Time) ([]model.TransactionFingerprint, error)
 	Update(ctx context.Context, userID uuid.UUID, transaction model.Transaction) (*model.Transaction, error)
 	Delete(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
+	CreateTransfer(ctx context.Context, userID uuid.UUID, req model.CreateTransferRequest) (*model.TransferResult, error)
+	DeleteTransfer(ctx context.Context, userID uuid.UUID, groupID uuid.UUID) error
 	MonthlyTotalsByCurrency(ctx context.Context, userID uuid.UUID, month time.Time) ([]model.MonthlyCurrencyTotal, error)
 }
 
@@ -95,6 +108,7 @@ type CategoryService interface {
 	CreateCategory(ctx context.Context, userID uuid.UUID, req model.CreateCategoryRequest) (*model.Category, error)
 	GetCategory(ctx context.Context, id uuid.UUID) (*model.Category, error)
 	ListCategories(ctx context.Context, userID uuid.UUID) ([]model.Category, error)
+	UpdateCategory(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.UpdateCategoryRequest) (*model.Category, error)
 	DeleteCategory(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
 }
 
@@ -104,9 +118,11 @@ type TransactionService interface {
 	ListTransactions(ctx context.Context, userID uuid.UUID, filters model.TransactionFilters) (*model.PaginatedTransactions, error)
 	ExportTransactions(ctx context.Context, userID uuid.UUID, filters model.TransactionFilters, emit func(model.TransactionExportRow) error) error
 	PreviewImport(ctx context.Context, userID uuid.UUID, r io.Reader) (*model.ImportResult, error)
-	ImportTransactions(ctx context.Context, userID uuid.UUID, r io.Reader) (*model.ImportResult, error)
+	ImportTransactions(ctx context.Context, userID uuid.UUID, r io.Reader, allowDuplicates bool) (*model.ImportResult, error)
 	UpdateTransaction(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.UpdateTransactionRequest) (*model.Transaction, error)
 	DeleteTransaction(ctx context.Context, userID uuid.UUID, id uuid.UUID) error
+	CreateTransfer(ctx context.Context, userID uuid.UUID, req model.CreateTransferRequest) (*model.TransferResult, error)
+	DeleteTransfer(ctx context.Context, userID uuid.UUID, groupID uuid.UUID) error
 	GetDashboardSummary(ctx context.Context, userID uuid.UUID) (*model.DashboardSummary, error)
 }
 
@@ -231,6 +247,9 @@ func (s *accountService) DeleteAccount(ctx context.Context, userID uuid.UUID, id
 		if errors.Is(err, ErrAccountNotFound) {
 			return ErrAccountNotFound
 		}
+		if errors.Is(err, ErrAccountHasTransfers) {
+			return ErrAccountHasTransfers
+		}
 		return fmt.Errorf("delete account: %w", err)
 	}
 
@@ -296,7 +315,57 @@ func (s *categoryService) ListCategories(ctx context.Context, userID uuid.UUID) 
 	return categories, nil
 }
 
+func (s *categoryService) UpdateCategory(ctx context.Context, userID uuid.UUID, id uuid.UUID, req model.UpdateCategoryRequest) (*model.Category, error) {
+	existing, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		if errors.Is(err, ErrCategoryNotFound) {
+			return nil, ErrCategoryNotFound
+		}
+		return nil, fmt.Errorf("get category: %w", err)
+	}
+	if existing.UserID != userID {
+		return nil, ErrCategoryNotFound
+	}
+
+	name := existing.Name
+	if req.Name != nil {
+		name = strings.TrimSpace(*req.Name)
+		if name == "" {
+			return nil, ErrInvalidName
+		}
+	}
+
+	color := existing.Color
+	if req.Color != nil {
+		color = strings.TrimSpace(*req.Color)
+		if color == "" {
+			color = DefaultCategoryColor
+		}
+	}
+
+	updated, err := s.repo.UpdateCategory(ctx, userID, id, name, color)
+	if err != nil {
+		if errors.Is(err, ErrCategoryNotFound) {
+			return nil, ErrCategoryNotFound
+		}
+		if errors.Is(err, ErrCategoryNameExists) {
+			return nil, ErrCategoryNameExists
+		}
+		return nil, fmt.Errorf("update category: %w", err)
+	}
+
+	return &updated, nil
+}
+
 func (s *categoryService) DeleteCategory(ctx context.Context, userID uuid.UUID, id uuid.UUID) error {
+	inUse, err := s.repo.CategoryHasTransactions(ctx, userID, id)
+	if err != nil {
+		return fmt.Errorf("check category transactions: %w", err)
+	}
+	if inUse {
+		return ErrCategoryInUse
+	}
+
 	if err := s.repo.Delete(ctx, userID, id); err != nil {
 		if errors.Is(err, ErrCategoryNotFound) {
 			return ErrCategoryNotFound
@@ -320,6 +389,8 @@ func NewTransactionService(repo TransactionRepository, accounts AccountRepositor
 		categories: categories,
 	}
 }
+
+var _ TransactionService = (*transactionService)(nil)
 
 func (s *transactionService) CreateTransaction(ctx context.Context, userID uuid.UUID, req model.CreateTransactionRequest) (*model.Transaction, error) {
 	transactionType := strings.ToLower(strings.TrimSpace(req.Type))
@@ -539,6 +610,75 @@ func (s *transactionService) DeleteTransaction(ctx context.Context, userID uuid.
 			return ErrSystemEntryImmutable
 		}
 		return fmt.Errorf("delete transaction: %w", err)
+	}
+
+	return nil
+}
+
+func (s *transactionService) CreateTransfer(ctx context.Context, userID uuid.UUID, req model.CreateTransferRequest) (*model.TransferResult, error) {
+	if req.Amount <= 0 || math.IsNaN(req.Amount) || math.IsInf(req.Amount, 0) {
+		return nil, ErrInvalidAmount
+	}
+
+	date, err := time.Parse("2006-01-02", strings.TrimSpace(req.Date))
+	if err != nil {
+		return nil, ErrInvalidDate
+	}
+
+	if req.FromAccountID == req.ToAccountID {
+		return nil, ErrSameAccount
+	}
+
+	from, err := s.accounts.GetByID(ctx, req.FromAccountID)
+	if err != nil {
+		if errors.Is(err, ErrAccountNotFound) {
+			return nil, ErrAccountNotFound
+		}
+		return nil, fmt.Errorf("get source account: %w", err)
+	}
+	if from.UserID != userID {
+		return nil, ErrAccountNotFound
+	}
+
+	to, err := s.accounts.GetByID(ctx, req.ToAccountID)
+	if err != nil {
+		if errors.Is(err, ErrAccountNotFound) {
+			return nil, ErrAccountNotFound
+		}
+		return nil, fmt.Errorf("get destination account: %w", err)
+	}
+	if to.UserID != userID {
+		return nil, ErrAccountNotFound
+	}
+
+	if from.Currency != to.Currency {
+		return nil, ErrTransferCurrencyMismatch
+	}
+
+	req.Date = date.Format("2006-01-02")
+	transfer, err := s.repo.CreateTransfer(ctx, userID, req)
+	if err != nil {
+		if errors.Is(err, ErrAccountNotFound) {
+			return nil, ErrAccountNotFound
+		}
+		if errors.Is(err, ErrSameAccount) {
+			return nil, ErrSameAccount
+		}
+		if errors.Is(err, ErrTransferCurrencyMismatch) {
+			return nil, ErrTransferCurrencyMismatch
+		}
+		return nil, fmt.Errorf("create transfer: %w", err)
+	}
+
+	return transfer, nil
+}
+
+func (s *transactionService) DeleteTransfer(ctx context.Context, userID uuid.UUID, groupID uuid.UUID) error {
+	if err := s.repo.DeleteTransfer(ctx, userID, groupID); err != nil {
+		if errors.Is(err, ErrTransferNotFound) {
+			return ErrTransferNotFound
+		}
+		return fmt.Errorf("delete transfer: %w", err)
 	}
 
 	return nil
