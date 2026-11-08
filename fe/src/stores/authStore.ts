@@ -8,6 +8,10 @@ interface AuthStore extends AuthState {
   register: (email: string, password: string) => Promise<void>;
   forgotPassword: (email: string) => Promise<string>;
   resetPassword: (token: string, password: string) => Promise<string>;
+  changePassword: (
+    currentPassword: string,
+    newPassword: string
+  ) => Promise<string>;
   logout: () => void;
   clearError: () => void;
 }
@@ -145,6 +149,38 @@ export const useAuthStore = create<AuthStore>()(
 
         const data = (await res.json().catch(() => ({}))) as MessageBody;
         return data.message || 'Password reset successful';
+      },
+
+      changePassword: async (currentPassword, newPassword) => {
+        const { token } = get();
+
+        let res: Response;
+        try {
+          res = await fetch(apiUrl('/auth/change-password'), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify({
+              current_password: currentPassword,
+              new_password: newPassword,
+            }),
+          });
+        } catch {
+          throw new Error('Unable to reach the server. Please try again.');
+        }
+
+        // A wrong current password returns 401. Do not treat that as an expired
+        // session: this request bypasses `lib/api.ts` so no user is logged out.
+        if (!res.ok) {
+          throw new Error(
+            await readError(res, 'Unable to change your password.')
+          );
+        }
+
+        const data = (await res.json().catch(() => ({}))) as MessageBody;
+        return data.message || 'Password changed successfully';
       },
 
       logout: () => {

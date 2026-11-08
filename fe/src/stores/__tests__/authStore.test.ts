@@ -206,4 +206,78 @@ describe('auth store', () => {
       useAuthStore.getState().resetPassword('bad-token', 'newpassword')
     ).rejects.toThrow('invalid or expired token');
   });
+
+  it('changes the password with a bearer token and returns the server message', async () => {
+    useAuthStore.setState({
+      token: 'jwt-token',
+      user: testUser,
+      isAuthenticated: true,
+    });
+    const fetchMock = mockFetchOnce({ message: 'password changed' });
+
+    const message = await useAuthStore
+      .getState()
+      .changePassword('oldpassword', 'newpassword');
+
+    expect(message).toBe('password changed');
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/auth/change-password',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          Authorization: 'Bearer jwt-token',
+        }),
+        body: JSON.stringify({
+          current_password: 'oldpassword',
+          new_password: 'newpassword',
+        }),
+      })
+    );
+  });
+
+  it('falls back to the default success message when the server omits one', async () => {
+    useAuthStore.setState({
+      token: 'jwt-token',
+      user: testUser,
+      isAuthenticated: true,
+    });
+    mockFetchOnce({});
+
+    const message = await useAuthStore
+      .getState()
+      .changePassword('oldpassword', 'newpassword');
+
+    expect(message).toBe('Password changed successfully');
+  });
+
+  it('throws the server error on a wrong current password and keeps the session', async () => {
+    useAuthStore.setState({
+      token: 'jwt-token',
+      user: testUser,
+      isAuthenticated: true,
+    });
+    mockFetchOnce({ error: 'current password is incorrect' }, 401);
+
+    await expect(
+      useAuthStore.getState().changePassword('wrongpass', 'newpassword')
+    ).rejects.toThrow('current password is incorrect');
+
+    const state = useAuthStore.getState();
+    expect(state.isAuthenticated).toBe(true);
+    expect(state.token).toBe('jwt-token');
+    expect(state.user?.email).toBe('john.doe@example.com');
+  });
+
+  it('throws a fallback error when the server sends no message', async () => {
+    useAuthStore.setState({
+      token: 'jwt-token',
+      user: testUser,
+      isAuthenticated: true,
+    });
+    mockFetchOnce({}, 500);
+
+    await expect(
+      useAuthStore.getState().changePassword('oldpassword', 'newpassword')
+    ).rejects.toThrow('Unable to change your password.');
+  });
 });
