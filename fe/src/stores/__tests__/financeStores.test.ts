@@ -59,6 +59,7 @@ const transaction: Transaction = {
   category_name: category.name,
   kind: 'normal',
   currency: 'USD',
+  transfer_group_id: '00000000-0000-0000-0000-000000000000',
 };
 
 const summary: DashboardSummary = {
@@ -209,6 +210,31 @@ describe('finance stores', () => {
         expect(api.listTransactions).toHaveBeenCalledWith(
           expect.objectContaining({ type: 'expense' })
         );
+      });
+    });
+
+    it('passes a new page size to the API and resets to page 1', async () => {
+      vi.mocked(api.listTransactions).mockResolvedValue({
+        data: [],
+        total: 0,
+        page: 1,
+        page_size: 25,
+      });
+      useTransactionStore.setState({
+        filters: { page: 3, page_size: 10 },
+      });
+
+      useTransactionStore.getState().setFilters({ page_size: 25, page: 1 });
+
+      await vi.waitFor(() => {
+        expect(api.listTransactions).toHaveBeenCalledWith({
+          page: 1,
+          page_size: 25,
+        });
+      });
+      expect(useTransactionStore.getState().filters).toEqual({
+        page: 1,
+        page_size: 25,
       });
     });
 

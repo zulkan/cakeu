@@ -47,6 +47,7 @@ const transaction: Transaction = {
   category_name: category.name,
   kind: 'normal',
   currency: 'USD',
+  transfer_group_id: '00000000-0000-0000-0000-000000000000',
 };
 
 const summary: DashboardSummary = {

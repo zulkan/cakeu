@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Plus, Tags } from 'lucide-react';
 import { useCategoryStore } from '../stores/categoryStore';
+import { useToastStore } from '../stores/toastStore';
 import type { Category, CreateCategoryRequest } from '../types';
 import { PageHeader } from '../components/ui/PageHeader';
 import { Button } from '../components/ui/Button';
@@ -9,6 +10,10 @@ import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { CategoryFormModal } from '../components/categories/CategoryFormModal';
 import { CategoryGroup } from '../components/categories/CategoryGroup';
 
+function messageOf(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
+
 function Categories() {
   const categories = useCategoryStore((state) => state.categories);
   const isLoading = useCategoryStore((state) => state.isLoading);
@@ -16,35 +21,40 @@ function Categories() {
   const fetchCategories = useCategoryStore((state) => state.fetchCategories);
   const createCategory = useCategoryStore((state) => state.createCategory);
   const deleteCategory = useCategoryStore((state) => state.deleteCategory);
+  const pushToast = useToastStore((state) => state.push);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Category | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   useEffect(() => {
     void fetchCategories();
   }, [fetchCategories]);
 
   const handleCreate = async (data: CreateCategoryRequest) => {
-    await createCategory(data);
+    try {
+      await createCategory(data);
+      pushToast({ title: 'Category added', tone: 'success' });
+    } catch (failure) {
+      pushToast({ title: messageOf(failure, 'Unable to add category'), tone: 'error' });
+      throw failure;
+    }
   };
 
   const handleDelete = async () => {
     if (!deleteTarget) return;
 
     setIsDeleting(true);
-    setDeleteError(null);
 
     try {
       await deleteCategory(deleteTarget.id);
       setDeleteTarget(null);
+      pushToast({ title: 'Category deleted', tone: 'success' });
     } catch (deleteFailure) {
-      setDeleteError(
-        deleteFailure instanceof Error
-          ? deleteFailure.message
-          : 'Unable to delete category'
-      );
+      pushToast({
+        title: messageOf(deleteFailure, 'Unable to delete category'),
+        tone: 'error',
+      });
     } finally {
       setIsDeleting(false);
     }
@@ -93,20 +103,14 @@ function Categories() {
             description="Money coming in"
             categories={incomeCategories}
             tone="income"
-            onDelete={(target) => {
-              setDeleteError(null);
-              setDeleteTarget(target);
-            }}
+            onDelete={setDeleteTarget}
           />
           <CategoryGroup
             title="Expense"
             description="Money going out"
             categories={expenseCategories}
             tone="expense"
-            onDelete={(target) => {
-              setDeleteError(null);
-              setDeleteTarget(target);
-            }}
+            onDelete={setDeleteTarget}
           />
         </div>
       )}
@@ -126,12 +130,10 @@ function Categories() {
             : ''
         }
         isLoading={isDeleting}
-        error={deleteError}
         onConfirm={() => void handleDelete()}
         onCancel={() => {
           if (isDeleting) return;
           setDeleteTarget(null);
-          setDeleteError(null);
         }}
       />
     </div>

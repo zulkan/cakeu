@@ -1,4 +1,5 @@
-import { Lock, Pencil, Trash2 } from 'lucide-react';
+import { memo } from 'react';
+import { ArrowLeftRight, Lock, Paperclip, Pencil, Trash2 } from 'lucide-react';
 import type { Category, Transaction } from '../../types';
 import { formatCurrency, formatDate } from '../../lib/format';
 import { TypeBadge } from '../ui/TypeBadge';
@@ -8,19 +9,33 @@ interface TransactionListProps {
   categories: Category[];
   onEdit: (transaction: Transaction) => void;
   onDelete: (transaction: Transaction) => void;
+  onAttachments?: (transaction: Transaction) => void;
 }
 
 function systemLabel(transaction: Transaction): string {
-  return transaction.kind === 'opening'
-    ? 'Opening balance'
-    : 'Balance adjustment';
+  if (transaction.kind === 'opening') return 'Opening balance';
+  if (transaction.kind === 'transfer') return 'Transfer';
+  return 'Balance adjustment';
 }
 
-export function TransactionList({
+function actionLabel(transaction: Transaction, action: 'Edit' | 'Delete'): string {
+  const subject =
+    transaction.description ||
+    (transaction.kind === 'transfer' ? 'Transfer' : transaction.category_name);
+  return `${action} ${transaction.kind === 'transfer' ? 'transfer' : 'transaction'} ${subject}`;
+}
+
+function attachmentsLabel(transaction: Transaction): string {
+  const subject = transaction.description || transaction.category_name;
+  return `Attachments for ${subject}`;
+}
+
+export const TransactionList = memo(function TransactionList({
   transactions,
   categories,
   onEdit,
   onDelete,
+  onAttachments,
 }: TransactionListProps) {
   const colorById = new Map(
     categories.map((category) => [category.id, category.color])
@@ -59,6 +74,7 @@ export function TransactionList({
             {transactions.map((transaction) => {
               const isIncome = transaction.type === 'income';
               const isSystem = transaction.kind !== 'normal';
+              const isTransfer = transaction.kind === 'transfer';
 
               return (
                 <tr
@@ -76,7 +92,14 @@ export function TransactionList({
                   <td className="whitespace-nowrap px-4 py-3">
                     {isSystem ? (
                       <span className="inline-flex items-center gap-1.5 rounded-full bg-warm-100 px-2.5 py-1 text-xs font-semibold text-warm-800">
-                        <Lock className="h-3 w-3" aria-hidden="true" />
+                        {isTransfer ? (
+                          <ArrowLeftRight
+                            className="h-3 w-3"
+                            aria-hidden="true"
+                          />
+                        ) : (
+                          <Lock className="h-3 w-3" aria-hidden="true" />
+                        )}
                         {systemLabel(transaction)}
                       </span>
                     ) : (
@@ -118,7 +141,7 @@ export function TransactionList({
                     )}
                   </td>
                   <td className="px-4 py-3">
-                    {isSystem ? (
+                    {isSystem && !isTransfer ? (
                       <div className="flex items-center justify-end">
                         <span
                           className="rounded-lg p-2 text-stone-300"
@@ -129,18 +152,35 @@ export function TransactionList({
                       </div>
                     ) : (
                       <div className="flex items-center justify-end gap-1">
-                        <button
-                          type="button"
-                          onClick={() => onEdit(transaction)}
-                          aria-label={`Edit transaction ${transaction.description || transaction.category_name}`}
-                          className="rounded-lg p-2 text-stone-400 transition-colors hover:bg-brand-50 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
-                        >
-                          <Pencil className="h-4 w-4" aria-hidden="true" />
-                        </button>
+                        {!isSystem && onAttachments && (
+                          <button
+                            type="button"
+                            onClick={() => onAttachments(transaction)}
+                            aria-label={attachmentsLabel(transaction)}
+                            className="rounded-lg p-2 text-stone-400 transition-colors hover:bg-brand-50 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+                          >
+                            <Paperclip className="h-4 w-4" aria-hidden="true" />
+                          </button>
+                        )}
+                        {!isSystem && (
+                          <button
+                            type="button"
+                            onClick={() => onEdit(transaction)}
+                            aria-label={actionLabel(transaction, 'Edit')}
+                            className="rounded-lg p-2 text-stone-400 transition-colors hover:bg-brand-50 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+                          >
+                            <Pencil className="h-4 w-4" aria-hidden="true" />
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => onDelete(transaction)}
-                          aria-label={`Delete transaction ${transaction.description || transaction.category_name}`}
+                          aria-label={actionLabel(transaction, 'Delete')}
+                          title={
+                            isTransfer
+                              ? 'Removes both sides of this transfer'
+                              : undefined
+                          }
                           className="rounded-lg p-2 text-stone-400 transition-colors hover:bg-expense-light hover:text-expense focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
                         >
                           <Trash2 className="h-4 w-4" aria-hidden="true" />
@@ -159,6 +199,7 @@ export function TransactionList({
         {transactions.map((transaction) => {
           const isIncome = transaction.type === 'income';
           const isSystem = transaction.kind !== 'normal';
+          const isTransfer = transaction.kind === 'transfer';
 
           return (
             <li key={transaction.id} className="px-4 py-4">
@@ -189,7 +230,7 @@ export function TransactionList({
                       transaction.currency
                     )}
                   </span>
-                  {isSystem ? (
+                  {isSystem && !isTransfer ? (
                     <span
                       className="rounded-lg p-1.5 text-stone-300"
                       title="System entries cannot be edited or deleted"
@@ -198,18 +239,35 @@ export function TransactionList({
                     </span>
                   ) : (
                     <div className="flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => onEdit(transaction)}
-                        aria-label={`Edit transaction ${transaction.description || transaction.category_name}`}
-                        className="rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-brand-50 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
-                      >
-                        <Pencil className="h-4 w-4" aria-hidden="true" />
-                      </button>
+                      {!isSystem && onAttachments && (
+                        <button
+                          type="button"
+                          onClick={() => onAttachments(transaction)}
+                          aria-label={attachmentsLabel(transaction)}
+                          className="rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-brand-50 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+                        >
+                          <Paperclip className="h-4 w-4" aria-hidden="true" />
+                        </button>
+                      )}
+                      {!isSystem && (
+                        <button
+                          type="button"
+                          onClick={() => onEdit(transaction)}
+                          aria-label={actionLabel(transaction, 'Edit')}
+                          className="rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-brand-50 hover:text-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+                        >
+                          <Pencil className="h-4 w-4" aria-hidden="true" />
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => onDelete(transaction)}
-                        aria-label={`Delete transaction ${transaction.description || transaction.category_name}`}
+                        aria-label={actionLabel(transaction, 'Delete')}
+                        title={
+                          isTransfer
+                            ? 'Removes both sides of this transfer'
+                            : undefined
+                        }
                         className="rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-expense-light hover:text-expense focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
                       >
                         <Trash2 className="h-4 w-4" aria-hidden="true" />
@@ -224,4 +282,4 @@ export function TransactionList({
       </ul>
     </>
   );
-}
+});

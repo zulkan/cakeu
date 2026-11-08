@@ -3,7 +3,26 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BudgetSection } from '../BudgetSection';
 import { useBudgetStore } from '../../../stores/budgetStore';
-import type { BudgetStatus, Category } from '../../../types';
+import { useAccountStore } from '../../../stores/accountStore';
+import type { Account, BudgetStatus, Category } from '../../../types';
+
+const account: Account = {
+  id: 'account-1',
+  name: 'Everyday checking',
+  balance: 1250,
+  opening_balance: 1250,
+  entry_count: 1,
+  currency: 'USD',
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
+};
+
+const idrAccount: Account = {
+  ...account,
+  id: 'account-2',
+  name: 'Indonesian savings',
+  currency: 'IDR',
+};
 
 const expenseCategory: Category = {
   id: 'category-1',
@@ -22,6 +41,7 @@ const incomeCategory: Category = {
 };
 
 const underBudget: BudgetStatus = {
+  currency: 'USD',
   category_id: 'category-1',
   category_name: 'Groceries',
   budget: 200,
@@ -31,6 +51,7 @@ const underBudget: BudgetStatus = {
 };
 
 const overBudget: BudgetStatus = {
+  currency: 'USD',
   category_id: 'category-3',
   category_name: 'Dining',
   budget: 100,
@@ -39,8 +60,20 @@ const overBudget: BudgetStatus = {
   percent: 150,
 };
 
-function renderSection(categories: Category[] = [expenseCategory, incomeCategory]) {
-  return render(<BudgetSection categories={categories} currency="USD" />);
+const idrBudget: BudgetStatus = {
+  currency: 'IDR',
+  category_id: 'category-1',
+  category_name: 'Groceries',
+  budget: 3000000,
+  spent: 1000000,
+  remaining: 2000000,
+  percent: 33,
+};
+
+function renderSection(
+  categories: Category[] = [expenseCategory, incomeCategory]
+) {
+  return render(<BudgetSection categories={categories} />);
 }
 
 describe('BudgetSection', () => {
@@ -55,6 +88,12 @@ describe('BudgetSection', () => {
       fetchBudgets: vi.fn(async () => undefined),
       upsertBudget: vi.fn(async () => undefined),
       deleteBudget: vi.fn(async () => undefined),
+    });
+    useAccountStore.setState({
+      accounts: [account],
+      isLoading: false,
+      error: null,
+      fetchAccounts: vi.fn(async () => undefined),
     });
   });
 
@@ -110,7 +149,7 @@ describe('BudgetSection', () => {
     expect(useBudgetStore.getState().fetchBudgets).toHaveBeenCalled();
   });
 
-  it('saves a budget from the editor', async () => {
+  it('saves a budget from the editor with the account currency', async () => {
     const user = userEvent.setup();
     renderSection();
 
@@ -123,12 +162,37 @@ describe('BudgetSection', () => {
     await waitFor(() => {
       expect(useBudgetStore.getState().upsertBudget).toHaveBeenCalledWith(
         expenseCategory.id,
-        250
+        250,
+        'USD'
       );
     });
   });
 
-  it('removes an existing budget from the editor', async () => {
+  it('saves the currency selected in the editor', async () => {
+    const user = userEvent.setup();
+    useAccountStore.setState({ accounts: [account, idrAccount] });
+    renderSection();
+
+    await user.click(screen.getByRole('button', { name: /edit budgets/i }));
+
+    const dialog = screen.getByRole('dialog');
+    await user.selectOptions(
+      within(dialog).getByLabelText('Currency'),
+      'IDR'
+    );
+    await user.type(within(dialog).getByLabelText('Monthly limit'), '250');
+    await user.click(within(dialog).getByRole('button', { name: /save budget/i }));
+
+    await waitFor(() => {
+      expect(useBudgetStore.getState().upsertBudget).toHaveBeenCalledWith(
+        expenseCategory.id,
+        250,
+        'IDR'
+      );
+    });
+  });
+
+  it('removes an existing budget from the editor using its currency', async () => {
     const user = userEvent.setup();
     useBudgetStore.setState({ budgets: [underBudget] });
     renderSection();
@@ -143,8 +207,29 @@ describe('BudgetSection', () => {
 
     await waitFor(() => {
       expect(useBudgetStore.getState().deleteBudget).toHaveBeenCalledWith(
-        underBudget.category_id
+        underBudget.category_id,
+        'USD'
       );
     });
+  });
+
+  it('defaults the currency selector to the edited budget currency', () => {
+    useBudgetStore.setState({ budgets: [idrBudget] });
+    useAccountStore.setState({ accounts: [account, idrAccount] });
+
+    renderSection();
+
+    expect(screen.getByLabelText('Currency')).toHaveValue('IDR');
+  });
+
+  it('disables budget editing with a hint when the user has no accounts', () => {
+    useAccountStore.setState({ accounts: [] });
+
+    renderSection();
+
+    expect(
+      screen.getByRole('button', { name: /edit budgets/i })
+    ).toBeDisabled();
+    expect(screen.getByText('Add an account to set budgets.')).toBeInTheDocument();
   });
 });

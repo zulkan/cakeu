@@ -6,6 +6,8 @@ import Recurring from '../Recurring';
 import { useRecurringStore } from '../../stores/recurringStore';
 import { useAccountStore } from '../../stores/accountStore';
 import { useCategoryStore } from '../../stores/categoryStore';
+import { useToastStore } from '../../stores/toastStore';
+import { Toaster } from '../../components/ui/Toaster';
 import { formatDate } from '../../lib/format';
 import type { Account, Category, RecurringRule } from '../../types';
 
@@ -48,12 +50,14 @@ function renderRecurring() {
   return render(
     <MemoryRouter>
       <Recurring />
+      <Toaster />
     </MemoryRouter>
   );
 }
 
 describe('Recurring page', () => {
   beforeEach(() => {
+    useToastStore.setState({ toasts: [] });
     useRecurringStore.setState({
       rules: [],
       isLoading: false,

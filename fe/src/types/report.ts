@@ -1,4 +1,5 @@
 export interface CashflowPoint {
+  currency: string;
   period: string;
   income: number;
   expense: number;
@@ -6,6 +7,7 @@ export interface CashflowPoint {
 }
 
 export interface CategoryTotal {
+  currency: string;
   category_id: string;
   category_name: string;
   type: 'income' | 'expense';
@@ -14,6 +16,7 @@ export interface CategoryTotal {
 }
 
 export interface MerchantTotal {
+  currency: string;
   description: string;
   total: number;
 }

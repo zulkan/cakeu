@@ -4,7 +4,8 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import Accounts from '../Accounts';
 import { useAccountStore } from '../../stores/accountStore';
-import type { Account } from '../../types';
+import { api } from '../../lib/api';
+import type { Account, Transaction, TransferResult } from '../../types';
 
 const account: Account = {
   id: 'account-1',
@@ -15,6 +16,49 @@ const account: Account = {
   currency: 'USD',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
+};
+
+const savings: Account = {
+  ...account,
+  id: 'account-2',
+  name: 'Savings',
+  balance: 5000,
+  opening_balance: 5000,
+};
+
+const euroWallet: Account = {
+  ...account,
+  id: 'account-3',
+  name: 'Euro wallet',
+  currency: 'EUR',
+};
+
+const transferLeg: Transaction = {
+  id: 'transfer-leg-1',
+  account_id: account.id,
+  category_id: '00000000-0000-0000-0000-000000000000',
+  type: 'expense',
+  amount: 25.5,
+  description: 'Move to savings',
+  date: '2026-11-08T00:00:00Z',
+  created_at: '2026-11-08T00:00:00Z',
+  account_name: account.name,
+  category_name: '',
+  kind: 'transfer',
+  currency: 'USD',
+  transfer_group_id: 'group-1',
+};
+
+const transferResult: TransferResult = {
+  transfer_group_id: 'group-1',
+  from: transferLeg,
+  to: {
+    ...transferLeg,
+    id: 'transfer-leg-2',
+    account_id: savings.id,
+    type: 'income',
+    account_name: savings.name,
+  },
 };
 
 function renderAccounts() {
@@ -37,6 +81,14 @@ describe('Accounts page', () => {
       adjustBalance: vi.fn(async () => undefined),
       deleteAccount: vi.fn(async () => undefined),
     });
+  });
+
+  it('names the delete action after the account', () => {
+    renderAccounts();
+
+    expect(
+      screen.getByRole('button', { name: 'Delete Everyday checking' })
+    ).toBeInTheDocument();
   });
 
   it('renders account cards with balance and currency', () => {
@@ -152,6 +204,84 @@ describe('Accounts page', () => {
 
     await waitFor(() => {
       expect(deleteAccount).toHaveBeenCalledWith(account.id);
+    });
+  });
+
+  it('disables transfer without a same-currency pair and explains why', () => {
+    renderAccounts();
+
+    expect(screen.getByRole('button', { name: 'Transfer' })).toBeDisabled();
+    expect(
+      screen.getByText(
+        'Add a second account in the same currency to transfer.'
+      )
+    ).toBeInTheDocument();
+  });
+
+  it('filters transfer destinations by currency and submits a transfer', async () => {
+    const user = userEvent.setup();
+    useAccountStore.setState({ accounts: [account, savings, euroWallet] });
+    const createTransfer = vi
+      .spyOn(api, 'createTransfer')
+      .mockResolvedValue(transferResult);
+    const fetchAccounts = vi.mocked(
+      useAccountStore.getState().fetchAccounts
+    );
+
+    renderAccounts();
+    fetchAccounts.mockClear();
+
+    await user.click(screen.getByRole('button', { name: 'Transfer' }));
+
+    const dialog = screen.getByRole('dialog');
+    const fromSelect = within(dialog).getByLabelText('From account');
+    const toSelect = within(dialog).getByLabelText('To account');
+
+    expect(
+      within(toSelect).getByRole('option', { name: 'Savings' })
+    ).toBeInTheDocument();
+    expect(
+      within(toSelect).queryByRole('option', { name: 'Everyday checking' })
+    ).not.toBeInTheDocument();
+    expect(
+      within(toSelect).queryByRole('option', { name: 'Euro wallet' })
+    ).not.toBeInTheDocument();
+
+    await user.selectOptions(fromSelect, savings.id);
+
+    expect(
+      within(toSelect).getByRole('option', { name: 'Everyday checking' })
+    ).toBeInTheDocument();
+    expect(
+      within(toSelect).queryByRole('option', { name: 'Savings' })
+    ).not.toBeInTheDocument();
+
+    await user.type(within(dialog).getByLabelText(/Amount/), '25.50');
+    await user.type(
+      within(dialog).getByLabelText(/Description/),
+      'Move to checking'
+    );
+    await user.click(
+      within(dialog).getByRole('button', { name: /transfer funds/i })
+    );
+
+    await waitFor(() => {
+      expect(createTransfer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          from_account_id: savings.id,
+          to_account_id: account.id,
+          amount: 25.5,
+          description: 'Move to checking',
+          date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+        })
+      );
+    });
+
+    await waitFor(() => {
+      expect(fetchAccounts).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     });
   });
 

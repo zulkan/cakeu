@@ -7,6 +7,7 @@ import {
   Paperclip,
   Send,
   Sparkles,
+  Trash2,
   TriangleAlert,
   User,
   X,
@@ -15,6 +16,7 @@ import { useChatStore } from '../stores/chatStore';
 import { PageHeader } from '../components/ui/PageHeader';
 import { MarkdownMessage } from '../components/chat/MarkdownMessage';
 import { Button } from '../components/ui/Button';
+import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { Select } from '../components/ui/Select';
 import { inputClass } from '../components/ui/formStyles';
 import { cn } from '../lib/cn';
@@ -40,7 +42,9 @@ function Chat() {
   const removeAttachment = useChatStore((state) => state.removeAttachment);
   const confirmAction = useChatStore((state) => state.confirmAction);
   const cancelAction = useChatStore((state) => state.cancelAction);
+  const clear = useChatStore((state) => state.clear);
   const [draft, setDraft] = useState('');
+  const [clearOpen, setClearOpen] = useState(false);
   const activeRows = attachedFile
     ? attachedFile.sheet_rows?.[selectedSheet ?? attachedFile.sheet] ??
       attachedFile.rows
@@ -71,6 +75,16 @@ function Chat() {
       <PageHeader
         title="Assistant"
         description="Ask about your money, or tell me what to record."
+        action={
+          <Button
+            variant="secondary"
+            onClick={() => setClearOpen(true)}
+            disabled={entries.length === 0 || isLoading}
+          >
+            <Trash2 className="h-4 w-4" aria-hidden="true" />
+            Clear conversation
+          </Button>
+        }
       />
 
       {error && (
@@ -330,6 +344,18 @@ function Chat() {
           </Button>
         </form>
       </div>
+
+      <ConfirmDialog
+        open={clearOpen}
+        title="Clear conversation?"
+        description="This removes the visible chat history from this browser. Transactions already recorded are not affected."
+        confirmLabel="Clear"
+        onConfirm={() => {
+          clear();
+          setClearOpen(false);
+        }}
+        onCancel={() => setClearOpen(false)}
+      />
     </div>
   );
 }

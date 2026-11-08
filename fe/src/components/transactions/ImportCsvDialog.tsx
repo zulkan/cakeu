@@ -4,6 +4,7 @@ import {
   AlertCircle,
   CheckCircle2,
   ChevronDown,
+  Copy,
   FileUp,
   Loader2,
 } from 'lucide-react';
@@ -66,6 +67,7 @@ export function ImportCsvDialog({
   const [mapping, setMapping] = useState<ImportMapping | null>(null);
   const [mode, setMode] = useState<ImportMode>('ai');
   const [mappingOpen, setMappingOpen] = useState(true);
+  const [allowDuplicates, setAllowDuplicates] = useState(false);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [isCommitting, setIsCommitting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -82,6 +84,7 @@ export function ImportCsvDialog({
     setMapping(null);
     setMode('ai');
     setMappingOpen(true);
+    setAllowDuplicates(false);
     setIsPreviewing(false);
     setIsCommitting(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -112,6 +115,7 @@ export function ImportCsvDialog({
       setSelectedSheet(result.sheet);
       setMapping(result.mapping ?? null);
       setMode(result.mode ?? nextMode);
+      setAllowDuplicates(false);
     } catch (failure) {
       if (requestId.current === currentRequest) {
         // Keep the workbook's sheet list and selection so Try again and
@@ -137,6 +141,7 @@ export function ImportCsvDialog({
     setMapping(null);
     setMode('ai');
     setMappingOpen(true);
+    setAllowDuplicates(false);
 
     if (!selected) {
       requestId.current += 1;
@@ -165,6 +170,9 @@ export function ImportCsvDialog({
         sheet: selectedSheet ?? undefined,
         mode,
         ...(mode === 'ai' && mapping ? { mapping } : {}),
+        ...(allowDuplicates && preview.duplicate_count > 0
+          ? { allow_duplicates: true }
+          : {}),
       });
       setSuccess(result);
       await onImported();
@@ -245,8 +253,15 @@ export function ImportCsvDialog({
               Import complete
             </p>
             <p className="mt-0.5 text-sm text-stone-700">
-              Imported {success.valid} of {success.total}{' '}
-              {success.total === 1 ? 'transaction' : 'transactions'}.
+              Imported {success.imported} of {success.total}{' '}
+              {success.total === 1 ? 'transaction' : 'transactions'}
+              {success.duplicate_count > 0 && (
+                <>
+                  , skipped {success.duplicate_count}{' '}
+                  {success.duplicate_count === 1 ? 'duplicate' : 'duplicates'}
+                </>
+              )}
+              .
             </p>
             {success.invalid > 0 && (
               <p className="mt-1 text-sm text-expense">
@@ -456,6 +471,15 @@ export function ImportCsvDialog({
                     value: preview.skipped,
                     tone: 'text-stone-600',
                   },
+                  ...(preview.duplicate_count > 0
+                    ? [
+                        {
+                          label: 'Duplicates',
+                          value: preview.duplicate_count,
+                          tone: 'text-warm-700',
+                        },
+                      ]
+                    : []),
                 ].map((stat) => (
                   <div
                     key={stat.label}
@@ -470,6 +494,52 @@ export function ImportCsvDialog({
                   </div>
                 ))}
               </dl>
+
+              {preview.duplicate_count > 0 && (
+                <div className="space-y-2 rounded-xl border border-warm-200 bg-warm-50/60 p-3">
+                  <p className="flex items-start gap-2 text-sm font-medium text-warm-900">
+                    <Copy
+                      className="mt-0.5 h-4 w-4 shrink-0 text-warm-600"
+                      aria-hidden="true"
+                    />
+                    <span>
+                      {preview.duplicate_count}{' '}
+                      {preview.duplicate_count === 1
+                        ? 'duplicate'
+                        : 'duplicates'}{' '}
+                      {allowDuplicates ? 'will be imported.' : 'will be skipped.'}
+                    </span>
+                  </p>
+                  <div className="space-y-1">
+                    <div className="flex items-start gap-3">
+                      <input
+                        id="import-allow-duplicates"
+                        type="checkbox"
+                        checked={allowDuplicates}
+                        onChange={(event) =>
+                          setAllowDuplicates(event.target.checked)
+                        }
+                        disabled={isCommitting}
+                        aria-describedby="import-allow-duplicates-hint"
+                        className="mt-0.5 h-4 w-4 rounded border-warm-300 accent-brand-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2"
+                      />
+                      <label
+                        htmlFor="import-allow-duplicates"
+                        className="cursor-pointer text-sm font-semibold text-stone-800"
+                      >
+                        Import duplicates anyway
+                      </label>
+                    </div>
+                    <p
+                      id="import-allow-duplicates-hint"
+                      className={cn('pl-7', hintClass)}
+                    >
+                      In-file duplicates are always skipped. Check this to also
+                      import rows that already exist in your ledger.
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {preview.errors.length > 0 && (
                 <section className="space-y-1.5">
@@ -492,6 +562,34 @@ export function ImportCsvDialog({
                         <span className="text-stone-500">
                           {' '}
                           — {rowError.message}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+
+              {preview.duplicates.length > 0 && (
+                <section className="space-y-1.5">
+                  <h3 className="flex items-center gap-1.5 text-sm font-semibold text-stone-700">
+                    <Copy
+                      className="h-4 w-4 text-warm-600"
+                      aria-hidden="true"
+                    />
+                    Duplicate rows
+                  </h3>
+                  <ul className="max-h-40 space-y-1 overflow-y-auto rounded-xl border border-warm-300 bg-warm-50 p-3">
+                    {preview.duplicates.map((duplicate) => (
+                      <li
+                        key={`${duplicate.row}-${duplicate.message}`}
+                        className="text-sm text-stone-700"
+                      >
+                        <span className="font-semibold text-warm-800">
+                          Row {duplicate.row}
+                        </span>
+                        <span className="text-stone-500">
+                          {' '}
+                          — {duplicate.message}
                         </span>
                       </li>
                     ))}
@@ -535,7 +633,10 @@ export function ImportCsvDialog({
                         {preview.preview
                           .slice(0, PREVIEW_ROW_LIMIT)
                           .map((row) => (
-                            <tr key={row.row}>
+                            <tr
+                              key={row.row}
+                              className={cn(row.duplicate && 'bg-warm-50/70')}
+                            >
                               <td className="whitespace-nowrap px-3 py-2 text-stone-500">
                                 {formatDate(row.date)}
                               </td>
@@ -545,8 +646,17 @@ export function ImportCsvDialog({
                               <td className="whitespace-nowrap px-3 py-2 text-right font-semibold text-stone-800">
                                 {formatCurrency(row.amount, currency)}
                               </td>
-                              <td className="max-w-[12rem] truncate px-3 py-2 text-stone-700">
-                                {row.description || '—'}
+                              <td className="max-w-[12rem] px-3 py-2 text-stone-700">
+                                <div className="flex items-center gap-2">
+                                  <span className="truncate">
+                                    {row.description || '—'}
+                                  </span>
+                                  {row.duplicate && (
+                                    <span className="inline-flex shrink-0 items-center rounded-full bg-warm-200 px-2 py-0.5 text-xs font-semibold text-warm-800">
+                                      Duplicate
+                                    </span>
+                                  )}
+                                </div>
                               </td>
                               <td className="whitespace-nowrap px-3 py-2 text-stone-600">
                                 {row.account}

@@ -1,35 +1,97 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Loader2, Pencil, PiggyBank, Plus } from 'lucide-react';
 import type { Category } from '../../types';
 import { useBudgetStore } from '../../stores/budgetStore';
+import { useAccountStore } from '../../stores/accountStore';
 import { formatCurrency } from '../../lib/format';
 import { formatMonthLabel } from '../../lib/dates';
 import { cn } from '../../lib/cn';
 import { Card } from '../ui/Card';
 import { Button } from '../ui/Button';
+import { Select } from '../ui/Select';
+import { labelClass } from '../ui/formStyles';
 import { BudgetEditorModal } from '../budgets/BudgetEditorModal';
 
 interface BudgetSectionProps {
   categories: Category[];
-  currency: string;
 }
 
-export function BudgetSection({ categories, currency }: BudgetSectionProps) {
+export function BudgetSection({ categories }: BudgetSectionProps) {
   const budgets = useBudgetStore((state) => state.budgets);
   const month = useBudgetStore((state) => state.month);
   const isLoading = useBudgetStore((state) => state.isLoading);
   const error = useBudgetStore((state) => state.error);
   const fetchBudgets = useBudgetStore((state) => state.fetchBudgets);
+  const accounts = useAccountStore((state) => state.accounts);
   const [editorOpen, setEditorOpen] = useState(false);
 
   useEffect(() => {
     void fetchBudgets();
   }, [fetchBudgets]);
 
-  const hasBudgets = budgets.length > 0;
+  const accountCurrencies = useMemo(() => {
+    const seen = new Set<string>();
+    const currencies: string[] = [];
+
+    accounts.forEach((account) => {
+      if (!seen.has(account.currency)) {
+        seen.add(account.currency);
+        currencies.push(account.currency);
+      }
+    });
+
+    return currencies;
+  }, [accounts]);
+
+  const budgetCurrencies = useMemo(() => {
+    const seen = new Set<string>();
+    const currencies: string[] = [];
+
+    budgets.forEach((budget) => {
+      if (!seen.has(budget.currency)) {
+        seen.add(budget.currency);
+        currencies.push(budget.currency);
+      }
+    });
+
+    return currencies;
+  }, [budgets]);
+
+  const currencyOptions = useMemo(() => {
+    const seen = new Set(accountCurrencies);
+    const currencies = [...accountCurrencies];
+
+    budgetCurrencies.forEach((currency) => {
+      if (!seen.has(currency)) {
+        seen.add(currency);
+        currencies.push(currency);
+      }
+    });
+
+    return currencies;
+  }, [accountCurrencies, budgetCurrencies]);
+
+  const defaultCurrency =
+    budgets[0]?.currency ||
+    accountCurrencies[0] ||
+    budgetCurrencies[0] ||
+    'USD';
+  const [preferredCurrency, setPreferredCurrency] = useState<string | null>(
+    null
+  );
+  const selectedCurrency =
+    preferredCurrency !== null && currencyOptions.includes(preferredCurrency)
+      ? preferredCurrency
+      : defaultCurrency;
+
+  const visibleBudgets = budgets.filter(
+    (budget) => budget.currency === selectedCurrency
+  );
+  const hasAnyBudgets = budgets.length > 0;
   const hasExpenseCategories = categories.some(
     (category) => category.type === 'expense'
   );
+  const canEdit = hasExpenseCategories && accountCurrencies.length > 0;
 
   return (
     <Card className="p-5">
@@ -40,18 +102,46 @@ export function BudgetSection({ categories, currency }: BudgetSectionProps) {
           </h2>
           <p className="text-xs text-stone-500">{formatMonthLabel(month)}</p>
         </div>
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={() => setEditorOpen(true)}
-          disabled={!hasExpenseCategories}
-        >
-          <Pencil className="h-4 w-4" aria-hidden="true" />
-          Edit budgets
-        </Button>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+          {currencyOptions.length > 1 && (
+            <div className="w-full space-y-1.5 sm:w-40">
+              <label htmlFor="budget-section-currency" className={labelClass}>
+                Currency
+              </label>
+              <Select
+                id="budget-section-currency"
+                value={selectedCurrency}
+                onChange={(event) =>
+                  setPreferredCurrency(event.target.value)
+                }
+              >
+                {currencyOptions.map((code) => (
+                  <option key={code} value={code}>
+                    {code}
+                  </option>
+                ))}
+              </Select>
+            </div>
+          )}
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setEditorOpen(true)}
+            disabled={!canEdit}
+          >
+            <Pencil className="h-4 w-4" aria-hidden="true" />
+            Edit budgets
+          </Button>
+        </div>
       </div>
 
-      {error && hasBudgets && (
+      {accountCurrencies.length === 0 && (
+        <p className="mt-2 text-xs text-stone-500">
+          Add an account to set budgets.
+        </p>
+      )}
+
+      {error && hasAnyBudgets && (
         <div
           role="alert"
           className="mt-4 rounded-xl border border-expense/20 bg-expense-light/60 px-4 py-3 text-sm font-medium text-expense"
@@ -60,7 +150,7 @@ export function BudgetSection({ categories, currency }: BudgetSectionProps) {
         </div>
       )}
 
-      {isLoading && !hasBudgets ? (
+      {isLoading && !hasAnyBudgets ? (
         <div
           role="status"
           className="mt-5 flex items-center justify-center gap-2 rounded-xl bg-warm-50/70 px-4 py-8 text-sm font-medium text-stone-500"
@@ -71,7 +161,7 @@ export function BudgetSection({ categories, currency }: BudgetSectionProps) {
           />
           Loading budgets…
         </div>
-      ) : error && !hasBudgets ? (
+      ) : error && !hasAnyBudgets ? (
         <div
           role="alert"
           className="mt-5 flex flex-col items-center gap-3 rounded-xl border border-expense/20 bg-expense-light/40 px-4 py-8 text-center"
@@ -85,12 +175,16 @@ export function BudgetSection({ categories, currency }: BudgetSectionProps) {
             Try again
           </Button>
         </div>
-      ) : !hasBudgets ? (
+      ) : visibleBudgets.length === 0 ? (
         <div className="mt-5 flex flex-col items-center gap-2 rounded-xl border border-dashed border-warm-300 bg-warm-50/60 px-4 py-8 text-center">
           <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-brand-100 text-brand-600">
             <PiggyBank className="h-5 w-5" aria-hidden="true" />
           </div>
-          <p className="text-sm font-bold text-stone-900">No budgets yet</p>
+          <p className="text-sm font-bold text-stone-900">
+            {hasAnyBudgets && currencyOptions.length > 1
+              ? `No budgets for ${selectedCurrency}`
+              : 'No budgets yet'}
+          </p>
           <p className="max-w-sm text-xs text-stone-500">
             Give each expense category a monthly limit and watch your progress
             here.
@@ -99,7 +193,7 @@ export function BudgetSection({ categories, currency }: BudgetSectionProps) {
             size="sm"
             className="mt-1"
             onClick={() => setEditorOpen(true)}
-            disabled={!hasExpenseCategories}
+            disabled={!canEdit}
           >
             <Plus className="h-4 w-4" aria-hidden="true" />
             Set a budget
@@ -107,13 +201,13 @@ export function BudgetSection({ categories, currency }: BudgetSectionProps) {
         </div>
       ) : (
         <ul className="mt-4 space-y-3">
-          {budgets.map((budget) => {
+          {visibleBudgets.map((budget) => {
             const overBudget = budget.percent > 100;
             const width = Math.min(Math.max(budget.percent, 0), 100);
 
             return (
               <li
-                key={budget.category_id}
+                key={`${budget.currency}-${budget.category_id}`}
                 className={cn(
                   'rounded-xl px-3 py-3',
                   overBudget ? 'bg-expense-light/50' : 'bg-warm-50/60'
@@ -129,10 +223,10 @@ export function BudgetSection({ categories, currency }: BudgetSectionProps) {
                     {budget.category_name}
                   </p>
                   <p className="shrink-0 text-sm font-semibold text-stone-600">
-                    {formatCurrency(budget.spent, currency)}
+                    {formatCurrency(budget.spent, budget.currency)}
                     <span className="font-normal text-stone-400">
                       {' '}
-                      / {formatCurrency(budget.budget, currency)}
+                      / {formatCurrency(budget.budget, budget.currency)}
                     </span>
                   </p>
                 </div>
@@ -166,8 +260,8 @@ export function BudgetSection({ categories, currency }: BudgetSectionProps) {
                     )}
                   >
                     {overBudget
-                      ? `Over by ${formatCurrency(Math.abs(budget.remaining), currency)}`
-                      : `${formatCurrency(budget.remaining, currency)} remaining`}
+                      ? `Over by ${formatCurrency(Math.abs(budget.remaining), budget.currency)}`
+                      : `${formatCurrency(budget.remaining, budget.currency)} remaining`}
                   </p>
                   <p
                     className={cn(
@@ -190,6 +284,8 @@ export function BudgetSection({ categories, currency }: BudgetSectionProps) {
         categories={categories}
         budgets={budgets}
         month={month}
+        currencies={currencyOptions}
+        currency={selectedCurrency}
       />
     </Card>
   );

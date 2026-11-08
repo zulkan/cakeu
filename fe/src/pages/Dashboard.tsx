@@ -231,14 +231,7 @@ function Dashboard() {
         </section>
       )}
 
-      {isMultiCurrency && (
-        <p className="text-xs text-stone-500">
-          Budgets and reports currently assume a single currency
-          ({primaryCurrency}).
-        </p>
-      )}
-
-      <BudgetSection categories={categories} currency={primaryCurrency} />
+      <BudgetSection categories={categories} />
 
       {isMultiCurrency ? (
         <div className="space-y-6">

@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import type { ChangeEvent } from 'react';
 import {
   ChevronLeft,
   ChevronRight,
@@ -11,18 +12,25 @@ import {
 import { useAccountStore } from '../stores/accountStore';
 import { useCategoryStore } from '../stores/categoryStore';
 import { useTransactionStore } from '../stores/transactionStore';
+import { useToastStore } from '../stores/toastStore';
 import type { CreateTransactionRequest, Transaction } from '../types';
 import { api } from '../lib/api';
 import { downloadBlob } from '../lib/download';
 import { PageHeader } from '../components/ui/PageHeader';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
+import { Select } from '../components/ui/Select';
 import { EmptyState, ErrorState, LoadingState } from '../components/ui/States';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { TransactionFiltersForm } from '../components/transactions/TransactionFiltersForm';
 import { TransactionFormModal } from '../components/transactions/TransactionFormModal';
 import { TransactionList } from '../components/transactions/TransactionList';
+import { AttachmentsModal } from '../components/transactions/AttachmentsModal';
 import { ImportCsvDialog } from '../components/transactions/ImportCsvDialog';
+
+function messageOf(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
 
 function Transactions() {
   const transactions = useTransactionStore((state) => state.transactions);
@@ -43,6 +51,7 @@ function Transactions() {
   const deleteTransaction = useTransactionStore(
     (state) => state.deleteTransaction
   );
+  const pushToast = useToastStore((state) => state.push);
 
   const accounts = useAccountStore((state) => state.accounts);
   const fetchAccounts = useAccountStore((state) => state.fetchAccounts);
@@ -53,8 +62,9 @@ function Transactions() {
   const [editTarget, setEditTarget] = useState<Transaction | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Transaction | null>(null);
+  const [attachmentsTarget, setAttachmentsTarget] =
+    useState<Transaction | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
 
@@ -79,14 +89,26 @@ function Transactions() {
   );
 
   const handleCreate = async (data: CreateTransactionRequest) => {
-    await createTransaction(data);
-    await fetchAccounts();
+    try {
+      await createTransaction(data);
+      await fetchAccounts();
+      pushToast({ title: 'Transaction added', tone: 'success' });
+    } catch (failure) {
+      pushToast({ title: messageOf(failure, 'Unable to add transaction'), tone: 'error' });
+      throw failure;
+    }
   };
 
   const handleUpdate = async (data: CreateTransactionRequest) => {
     if (!editTarget) return;
-    await updateTransaction(editTarget.id, data);
-    await fetchAccounts();
+    try {
+      await updateTransaction(editTarget.id, data);
+      await fetchAccounts();
+      pushToast({ title: 'Transaction updated', tone: 'success' });
+    } catch (failure) {
+      pushToast({ title: messageOf(failure, 'Unable to update transaction'), tone: 'error' });
+      throw failure;
+    }
   };
 
   const handleExport = async () => {
@@ -116,21 +138,49 @@ function Transactions() {
     if (!deleteTarget) return;
 
     setIsDeleting(true);
-    setDeleteError(null);
+    const isTransfer = deleteTarget.kind === 'transfer';
 
     try {
-      await deleteTransaction(deleteTarget.id);
+      if (isTransfer) {
+        await api.deleteTransfer(deleteTarget.transfer_group_id);
+        await fetchTransactions();
+      } else {
+        await deleteTransaction(deleteTarget.id);
+      }
       await fetchAccounts();
       setDeleteTarget(null);
+      pushToast({
+        title: isTransfer ? 'Transfer deleted' : 'Transaction deleted',
+        tone: 'success',
+      });
     } catch (deleteFailure) {
-      setDeleteError(
-        deleteFailure instanceof Error
-          ? deleteFailure.message
-          : 'Unable to delete transaction'
-      );
+      pushToast({
+        title: messageOf(deleteFailure, 'Unable to delete transaction'),
+        tone: 'error',
+      });
     } finally {
       setIsDeleting(false);
     }
+  };
+
+  const handleEdit = useCallback((target: Transaction) => {
+    setEditTarget(target);
+  }, []);
+
+  const handleDeleteRequest = useCallback((target: Transaction) => {
+    setDeleteTarget(target);
+  }, []);
+
+  const handleAttachments = useCallback((target: Transaction) => {
+    setAttachmentsTarget(target);
+  }, []);
+
+  const handleAttachmentsClose = useCallback(() => {
+    setAttachmentsTarget(null);
+  }, []);
+
+  const handlePageSizeChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    setFilters({ page_size: Number(event.target.value), page: 1 });
   };
 
   const clearFilters = () => {
@@ -251,17 +301,38 @@ function Transactions() {
           <TransactionList
             transactions={transactions}
             categories={categories}
-            onEdit={setEditTarget}
-            onDelete={(transaction) => {
-              setDeleteError(null);
-              setDeleteTarget(transaction);
-            }}
+            onEdit={handleEdit}
+            onDelete={handleDeleteRequest}
+            onAttachments={handleAttachments}
           />
 
           <div className="flex flex-col gap-3 border-t border-warm-200 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-xs text-stone-500">
-              Showing {rangeStart}–{rangeEnd} of {total}
-            </p>
+            <div className="flex flex-wrap items-center gap-3">
+              <p className="text-xs text-stone-500">
+                Showing {rangeStart}–{rangeEnd} of {total}
+              </p>
+              <div className="flex items-center gap-2">
+                <label
+                  htmlFor="transactions-page-size"
+                  className="text-xs font-medium text-stone-500"
+                >
+                  Rows per page
+                </label>
+                <Select
+                  id="transactions-page-size"
+                  value={pageSize}
+                  onChange={handlePageSizeChange}
+                  disabled={isLoading}
+                  className="h-9 w-20 py-0 text-xs"
+                >
+                  {[10, 25, 50, 100].map((size) => (
+                    <option key={size} value={size}>
+                      {size}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            </div>
             <div className="flex items-center gap-2">
               <Button
                 variant="secondary"
@@ -310,21 +381,31 @@ function Transactions() {
         onImported={handleImported}
       />
 
+      <AttachmentsModal
+        open={attachmentsTarget !== null}
+        transaction={attachmentsTarget}
+        onClose={handleAttachmentsClose}
+      />
+
       <ConfirmDialog
         open={deleteTarget !== null}
-        title="Delete transaction?"
+        title={
+          deleteTarget?.kind === 'transfer'
+            ? 'Delete transfer?'
+            : 'Delete transaction?'
+        }
         description={
           deleteTarget
-            ? `“${deleteTarget.description || deleteTarget.category_name}” will be removed and the account balance will be restored.`
+            ? deleteTarget.kind === 'transfer'
+              ? 'Both sides of this transfer will be removed and both account balances will be restored.'
+              : `“${deleteTarget.description || deleteTarget.category_name}” will be removed and the account balance will be restored.`
             : ''
         }
         isLoading={isDeleting}
-        error={deleteError}
         onConfirm={() => void handleDelete()}
         onCancel={() => {
           if (isDeleting) return;
           setDeleteTarget(null);
-          setDeleteError(null);
         }}
       />
     </div>

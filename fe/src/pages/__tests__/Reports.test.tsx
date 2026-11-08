@@ -24,12 +24,13 @@ const account: Account = {
 };
 
 const cashflow: CashflowPoint[] = [
-  { period: '2026-06', income: 1000, expense: 400, net: 600 },
-  { period: '2026-07', income: 1200, expense: 1500, net: -300 },
+  { currency: 'USD', period: '2026-06', income: 1000, expense: 400, net: 600 },
+  { currency: 'USD', period: '2026-07', income: 1200, expense: 1500, net: -300 },
 ];
 
 const categories: CategoryTotal[] = [
   {
+    currency: 'USD',
     category_id: 'category-1',
     category_name: 'Salary',
     type: 'income',
@@ -37,6 +38,7 @@ const categories: CategoryTotal[] = [
     share: 100,
   },
   {
+    currency: 'USD',
     category_id: 'category-2',
     category_name: 'Groceries',
     type: 'expense',
@@ -44,6 +46,7 @@ const categories: CategoryTotal[] = [
     share: 60,
   },
   {
+    currency: 'USD',
     category_id: 'category-3',
     category_name: 'Rent',
     type: 'expense',
@@ -53,8 +56,36 @@ const categories: CategoryTotal[] = [
 ];
 
 const merchants: MerchantTotal[] = [
-  { description: 'Whole Foods', total: 240 },
-  { description: 'Landlord', total: 600 },
+  { currency: 'USD', description: 'Whole Foods', total: 240 },
+  { currency: 'USD', description: 'Landlord', total: 600 },
+];
+
+const multiCurrencyCashflow: CashflowPoint[] = [
+  ...cashflow,
+  {
+    currency: 'IDR',
+    period: '2026-06',
+    income: 15000000,
+    expense: 5000000,
+    net: 10000000,
+  },
+];
+
+const multiCurrencyCategories: CategoryTotal[] = [
+  ...categories,
+  {
+    currency: 'IDR',
+    category_id: 'category-4',
+    category_name: 'Makan',
+    type: 'expense',
+    total: 5000000,
+    share: 100,
+  },
+];
+
+const multiCurrencyMerchants: MerchantTotal[] = [
+  ...merchants,
+  { currency: 'IDR', description: 'Warung', total: 5000000 },
 ];
 
 function renderReports() {
@@ -110,22 +141,66 @@ describe('Reports page', () => {
     expect(screen.getByText('$240.00')).toBeInTheDocument();
   });
 
-  it('shows per-section empty states when the range has no data', () => {
+  it('shows an empty state when the range has no rows', () => {
     useReportStore.setState({ cashflow: [], categories: [], merchants: [] });
     renderReports();
 
+    expect(screen.getByText('No report data')).toBeInTheDocument();
     expect(
-      screen.getByText('No cashflow recorded in this range.')
+      screen.getByText('No transactions were recorded in this date range.')
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText('Currency')).not.toBeInTheDocument();
+  });
+
+  it('defaults to the currency with the most rows and never mixes them', () => {
+    useReportStore.setState({
+      cashflow: multiCurrencyCashflow,
+      categories: multiCurrencyCategories,
+      merchants: multiCurrencyMerchants,
+    });
+    renderReports();
+
+    expect(screen.getByLabelText('Currency')).toHaveValue('USD');
+    expect(
+      screen.getByText('Showing USD — 1 other currency available')
+    ).toBeInTheDocument();
+    expect(screen.getByText('-$300.00')).toBeInTheDocument();
+    expect(screen.queryByText(/10,000,000\.00/)).not.toBeInTheDocument();
+  });
+
+  it('switches the displayed rows when the currency changes', async () => {
+    const user = userEvent.setup();
+    useReportStore.setState({
+      cashflow: multiCurrencyCashflow,
+      categories: multiCurrencyCategories,
+      merchants: multiCurrencyMerchants,
+    });
+    renderReports();
+
+    await user.selectOptions(screen.getByLabelText('Currency'), 'IDR');
+
+    expect(screen.getByLabelText('Currency')).toHaveValue('IDR');
+    expect(
+      screen.getByText('Showing IDR — 1 other currency available')
     ).toBeInTheDocument();
     expect(
-      screen.getByText('No income recorded in this range.')
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText('No expense recorded in this range.')
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText('No merchant activity recorded in this range.')
-    ).toBeInTheDocument();
+      screen.getAllByText(/10,000,000\.00/).length
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText('-$300.00')).not.toBeInTheDocument();
+  });
+
+  it('breaks a row-count tie alphabetically', () => {
+    useReportStore.setState({
+      cashflow: [
+        { currency: 'USD', period: '2026-06', income: 1, expense: 0, net: 1 },
+        { currency: 'IDR', period: '2026-06', income: 1, expense: 0, net: 1 },
+      ],
+      categories: [],
+      merchants: [],
+    });
+    renderReports();
+
+    expect(screen.getByLabelText('Currency')).toHaveValue('IDR');
   });
 
   it('shows a loading state', () => {

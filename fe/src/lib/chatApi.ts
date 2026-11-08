@@ -1,70 +1,74 @@
 import { apiUrl } from './apiBase';
+import { getToken } from './api';
+import { CHAT_TIMEOUT_MS, abortableScope } from './http';
 import type { ChatFile, ChatMessage, ChatResponse } from '../types/chat';
 
 interface ErrorBody {
   error?: string;
 }
 
-function getToken(): string | null {
-  try {
-    const stored = localStorage.getItem('auth-storage');
-    if (!stored) return null;
-    const parsed = JSON.parse(stored) as {
-      state?: { token?: string | null };
-    };
-    return parsed?.state?.token ?? null;
-  } catch {
-    return null;
-  }
-}
-
-async function post<T>(path: string, body?: unknown): Promise<T> {
-  const token = getToken();
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
-
-  const response = await fetch(apiUrl(path), {
-    method: 'POST',
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    const payload = (await response
-      .json()
-      .catch(() => ({}))) as ErrorBody;
-    throw new Error(payload.error || `Request failed: ${response.status}`);
-  }
-
-  return (await response.json()) as T;
-}
-
-async function postMultipart<T>(path: string, body: FormData): Promise<T> {
-  const token = getToken();
+function chatHeaders(json: boolean): Record<string, string> {
   const headers: Record<string, string> = {};
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
+  if (json) headers['Content-Type'] = 'application/json';
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
+async function readError(response: Response): Promise<Error> {
+  const payload = (await response.json().catch(() => ({}))) as ErrorBody;
+  return new Error(payload.error || `Request failed: ${response.status}`);
+}
+
+async function post<T>(
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal
+): Promise<T> {
+  const scope = abortableScope(CHAT_TIMEOUT_MS, signal);
+
+  try {
+    const response = await fetch(apiUrl(path), {
+      method: 'POST',
+      headers: chatHeaders(true),
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: scope.signal,
+    });
+
+    if (!response.ok) {
+      throw await readError(response);
+    }
+
+    return (await response.json()) as T;
+  } finally {
+    scope.dispose();
   }
+}
+
+async function postMultipart<T>(
+  path: string,
+  body: FormData,
+  signal?: AbortSignal
+): Promise<T> {
+  const scope = abortableScope(CHAT_TIMEOUT_MS, signal);
 
   // No Content-Type on purpose: the browser appends the multipart boundary.
-  const response = await fetch(apiUrl(path), {
-    method: 'POST',
-    headers,
-    body,
-  });
+  try {
+    const response = await fetch(apiUrl(path), {
+      method: 'POST',
+      headers: chatHeaders(false),
+      body,
+      signal: scope.signal,
+    });
 
-  if (!response.ok) {
-    const payload = (await response
-      .json()
-      .catch(() => ({}))) as ErrorBody;
-    throw new Error(payload.error || `Request failed: ${response.status}`);
+    if (!response.ok) {
+      throw await readError(response);
+    }
+
+    return (await response.json()) as T;
+  } finally {
+    scope.dispose();
   }
-
-  return (await response.json()) as T;
 }
 
 interface ChatRequestBody {

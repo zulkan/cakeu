@@ -17,7 +17,11 @@ export interface Category {
   created_at: string;
 }
 
-export type TransactionKind = 'normal' | 'opening' | 'adjustment';
+export type TransactionKind =
+  | 'normal'
+  | 'opening'
+  | 'adjustment'
+  | 'transfer';
 
 export interface Transaction {
   id: string;
@@ -32,6 +36,16 @@ export interface Transaction {
   category_name: string;
   kind: TransactionKind;
   currency: string;
+  transfer_group_id: string;
+}
+
+export interface Attachment {
+  id: string;
+  transaction_id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  created_at: string;
 }
 
 export interface CurrencyTotal {
@@ -105,6 +119,7 @@ export interface ImportPreviewRow {
   description: string;
   account: string;
   category: string;
+  duplicate?: boolean;
 }
 
 export type ImportMode = 'ai' | 'strict';
@@ -150,11 +165,14 @@ export interface ImportResult {
   valid: number;
   invalid: number;
   skipped: number;
+  imported: number;
+  duplicate_count: number;
   sheet: string;
   sheets: string[];
   mode?: ImportMode;
   mapping?: ImportMapping;
   errors: ImportRowError[];
+  duplicates: ImportRowError[];
   preview: ImportPreviewRow[];
 }
 
@@ -168,3 +186,17 @@ export interface CreateTransactionRequest {
 }
 
 export type UpdateTransactionRequest = Partial<CreateTransactionRequest>;
+
+export interface CreateTransferRequest {
+  from_account_id: string;
+  to_account_id: string;
+  amount: number;
+  date: string;
+  description?: string;
+}
+
+export interface TransferResult {
+  transfer_group_id: string;
+  from: Transaction;
+  to: Transaction;
+}

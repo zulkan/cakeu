@@ -18,6 +18,7 @@ import type {
 import { useAccountStore } from '../stores/accountStore';
 import { useCategoryStore } from '../stores/categoryStore';
 import { useRecurringStore } from '../stores/recurringStore';
+import { useToastStore } from '../stores/toastStore';
 import { formatCurrency, formatDate } from '../lib/format';
 import { cn } from '../lib/cn';
 import { PageHeader } from '../components/ui/PageHeader';
@@ -55,6 +56,7 @@ function Recurring() {
   const updateRule = useRecurringStore((state) => state.updateRule);
   const deleteRule = useRecurringStore((state) => state.deleteRule);
   const runNow = useRecurringStore((state) => state.runNow);
+  const pushToast = useToastStore((state) => state.push);
 
   const accounts = useAccountStore((state) => state.accounts);
   const fetchAccounts = useAccountStore((state) => state.fetchAccounts);
@@ -67,8 +69,6 @@ function Recurring() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
-  const [runMessage, setRunMessage] = useState<string | null>(null);
 
   useEffect(() => {
     void fetchRules();
@@ -83,32 +83,45 @@ function Recurring() {
   );
 
   const handleCreate = async (data: CreateRecurringRequest) => {
-    await createRule(data);
+    try {
+      await createRule(data);
+      pushToast({ title: 'Recurring rule created', tone: 'success' });
+    } catch (failure) {
+      pushToast({ title: messageOf(failure, 'Unable to create the rule'), tone: 'error' });
+      throw failure;
+    }
   };
 
   const handleUpdate = async (id: string, data: UpdateRecurringRequest) => {
-    await updateRule(id, data);
+    try {
+      await updateRule(id, data);
+      pushToast({ title: 'Recurring rule updated', tone: 'success' });
+    } catch (failure) {
+      pushToast({ title: messageOf(failure, 'Unable to update the rule'), tone: 'error' });
+      throw failure;
+    }
   };
 
   const handleToggle = async (rule: RecurringRule) => {
-    setActionError(null);
-    setRunMessage(null);
     setBusyId(rule.id);
 
     try {
       await updateRule(rule.id, { active: !rule.active });
+      pushToast({
+        title: rule.active ? 'Rule paused' : 'Rule resumed',
+        tone: 'success',
+      });
     } catch (toggleFailure) {
-      setActionError(
-        messageOf(toggleFailure, 'Unable to update the recurring rule')
-      );
+      pushToast({
+        title: messageOf(toggleFailure, 'Unable to update the recurring rule'),
+        tone: 'error',
+      });
     } finally {
       setBusyId(null);
     }
   };
 
   const handleRunNow = async (rule: RecurringRule) => {
-    setActionError(null);
-    setRunMessage(null);
     setBusyId(rule.id);
 
     try {
@@ -118,15 +131,18 @@ function Recurring() {
         categoryNames.get(rule.category_id) ||
         'this rule';
 
-      setRunMessage(
-        posted === 0
-          ? `No transactions were posted for “${label}” — it may already have run for this period.`
-          : `Posted ${posted} ${posted === 1 ? 'transaction' : 'transactions'} for “${label}”.`
-      );
+      pushToast({
+        title:
+          posted === 0
+            ? `No transactions were posted for “${label}” — it may already have run for this period.`
+            : `Posted ${posted} ${posted === 1 ? 'transaction' : 'transactions'} for “${label}”.`,
+        tone: posted === 0 ? 'info' : 'success',
+      });
     } catch (runFailure) {
-      setActionError(
-        messageOf(runFailure, 'Unable to run the recurring rule')
-      );
+      pushToast({
+        title: messageOf(runFailure, 'Unable to run the recurring rule'),
+        tone: 'error',
+      });
     } finally {
       setBusyId(null);
     }
@@ -136,15 +152,18 @@ function Recurring() {
     if (!deleteTarget) return;
 
     setIsDeleting(true);
-    setDeleteError(null);
 
     try {
       await deleteRule(deleteTarget.id);
       setDeleteTarget(null);
+      pushToast({ title: 'Recurring rule deleted', tone: 'success' });
     } catch (deleteFailure) {
-      setDeleteError(
-        messageOf(deleteFailure, 'Unable to delete the recurring rule')
+      const message = messageOf(
+        deleteFailure,
+        'Unable to delete the recurring rule'
       );
+      setDeleteError(message);
+      pushToast({ title: message, tone: 'error' });
     } finally {
       setIsDeleting(false);
     }
@@ -167,24 +186,6 @@ function Recurring() {
           </Button>
         }
       />
-
-      {actionError && (
-        <div
-          role="alert"
-          className="rounded-xl border border-expense/20 bg-expense-light/60 px-4 py-3 text-sm font-medium text-expense"
-        >
-          {actionError}
-        </div>
-      )}
-
-      {runMessage && (
-        <div
-          role="status"
-          className="rounded-xl border border-income/20 bg-income-light/60 px-4 py-3 text-sm font-medium text-income"
-        >
-          {runMessage}
-        </div>
-      )}
 
       {isLoading && rules.length === 0 ? (
         <LoadingState label="Loading recurring rules…" />

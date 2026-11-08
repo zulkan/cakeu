@@ -157,6 +157,7 @@ export function AccountCard({
               size="sm"
               variant="ghost"
               onClick={() => onDelete(account)}
+              aria-label={`Delete ${account.name}`}
               className="text-stone-500 hover:bg-expense-light hover:text-expense"
             >
               <Trash2 className="h-4 w-4" aria-hidden="true" />

@@ -169,7 +169,7 @@ function ResetPassword() {
 
           <Button
             type="submit"
-            disabled={isSubmitting}
+            disabled={isSubmitting || !token}
             className="w-full"
           >
             {isSubmitting ? (

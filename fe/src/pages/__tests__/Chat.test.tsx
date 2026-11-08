@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import Chat from '../Chat';
 import { useChatStore } from '../../stores/chatStore';
@@ -282,6 +282,28 @@ describe('Chat', () => {
 
     expect(screen.queryByLabelText('Sheet')).not.toBeInTheDocument();
     expect(screen.getByText(/sheet sheet1/i)).toBeInTheDocument();
+  });
+
+  it('clears the conversation after confirmation', async () => {
+    const user = userEvent.setup();
+    vi.mocked(chatApi.send).mockResolvedValue({ reply: 'Hello.', tool_calls: [] });
+
+    render(<Chat />);
+
+    await user.type(screen.getByLabelText('Message'), 'hello');
+    await user.click(screen.getByRole('button', { name: /send/i }));
+    await screen.findByText('Hello.');
+
+    await user.click(
+      screen.getByRole('button', { name: /clear conversation/i })
+    );
+    const dialog = screen.getByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Clear' }));
+
+    expect(
+      await screen.findByText(/ask me anything about your finances/i)
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Hello.')).not.toBeInTheDocument();
   });
 
   it('shows upload failures inline', async () => {    const user = userEvent.setup();

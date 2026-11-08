@@ -5,11 +5,13 @@ export interface Budget {
   category_name: string;
   month: string;
   amount: number;
+  currency: string;
   created_at: string;
   updated_at: string;
 }
 
 export interface BudgetStatus {
+  currency: string;
   category_id: string;
   category_name: string;
   budget: number;
@@ -22,4 +24,5 @@ export interface UpsertBudgetRequest {
   category_id: string;
   month: string;
   amount: number;
+  currency: string;
 }

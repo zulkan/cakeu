@@ -17,6 +17,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { displayName, initials } from '../../lib/format';
 import { cn } from '../../lib/cn';
 import { BrandMark } from '../BrandMark';
+import { Toaster } from '../ui/Toaster';
 
 interface NavItem {
   to: string;
@@ -172,6 +173,8 @@ export function AppShell() {
           <Outlet />
         </div>
       </main>
+
+      <Toaster />
     </div>
   );
 }

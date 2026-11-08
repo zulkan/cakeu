@@ -12,11 +12,12 @@ vi.mock('../../lib/api', () => ({
 }));
 
 const cashflow: CashflowPoint[] = [
-  { period: '2026-06', income: 1000, expense: 400, net: 600 },
+  { currency: 'USD', period: '2026-06', income: 1000, expense: 400, net: 600 },
 ];
 
 const categories: CategoryTotal[] = [
   {
+    currency: 'USD',
     category_id: 'category-1',
     category_name: 'Groceries',
     type: 'expense',
@@ -26,7 +27,7 @@ const categories: CategoryTotal[] = [
 ];
 
 const merchants: MerchantTotal[] = [
-  { description: 'Whole Foods', total: 240 },
+  { currency: 'USD', description: 'Whole Foods', total: 240 },
 ];
 
 describe('report store', () => {

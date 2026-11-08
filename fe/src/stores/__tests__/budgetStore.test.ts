@@ -12,6 +12,7 @@ vi.mock('../../lib/api', () => ({
 }));
 
 const status: BudgetStatus = {
+  currency: 'USD',
   category_id: 'category-1',
   category_name: 'Groceries',
   budget: 200,
@@ -27,6 +28,7 @@ const savedBudget: Budget = {
   category_name: 'Groceries',
   month: '2026-11-01T00:00:00Z',
   amount: 200,
+  currency: 'USD',
   created_at: '2026-11-01T00:00:00Z',
   updated_at: '2026-11-01T00:00:00Z',
 };
@@ -55,6 +57,17 @@ describe('budget store', () => {
     expect(useBudgetStore.getState().isLoading).toBe(false);
   });
 
+  it('persists the selected month under budget-storage', async () => {
+    vi.mocked(api.listBudgets).mockResolvedValue([]);
+
+    await useBudgetStore.getState().fetchBudgets('2026-12');
+
+    const stored = JSON.parse(
+      localStorage.getItem('budget-storage') ?? '{}'
+    ) as { state?: { month?: string } };
+    expect(stored.state?.month).toBe('2026-12');
+  });
+
   it('captures a load error', async () => {
     vi.mocked(api.listBudgets).mockRejectedValue(new Error('boom'));
 
@@ -68,12 +81,13 @@ describe('budget store', () => {
     vi.mocked(api.upsertBudget).mockResolvedValue(savedBudget);
     vi.mocked(api.listBudgets).mockResolvedValue([status]);
 
-    await useBudgetStore.getState().upsertBudget('category-1', 200);
+    await useBudgetStore.getState().upsertBudget('category-1', 200, 'USD');
 
     expect(api.upsertBudget).toHaveBeenCalledWith({
       category_id: 'category-1',
       month: '2026-11',
       amount: 200,
+      currency: 'USD',
     });
     expect(api.listBudgets).toHaveBeenCalledWith('2026-11');
     expect(useBudgetStore.getState().budgets).toEqual([status]);
@@ -86,7 +100,7 @@ describe('budget store', () => {
     );
 
     await expect(
-      useBudgetStore.getState().upsertBudget('category-1', 0)
+      useBudgetStore.getState().upsertBudget('category-1', 0, 'USD')
     ).rejects.toThrow('amount must be greater than zero');
 
     expect(useBudgetStore.getState().saveError).toBe(
@@ -100,9 +114,13 @@ describe('budget store', () => {
     vi.mocked(api.deleteBudget).mockResolvedValue(undefined);
     vi.mocked(api.listBudgets).mockResolvedValue([]);
 
-    await useBudgetStore.getState().deleteBudget('category-1');
+    await useBudgetStore.getState().deleteBudget('category-1', 'USD');
 
-    expect(api.deleteBudget).toHaveBeenCalledWith('category-1', '2026-11');
+    expect(api.deleteBudget).toHaveBeenCalledWith(
+      'category-1',
+      '2026-11',
+      'USD'
+    );
     expect(useBudgetStore.getState().budgets).toEqual([]);
   });
 });
