@@ -7,6 +7,7 @@ import Login from './pages/Login';
 import Register from './pages/Register';
 import ForgotPassword from './pages/ForgotPassword';
 import ResetPassword from './pages/ResetPassword';
+import ChangePassword from './pages/ChangePassword';
 import Dashboard from './pages/Dashboard';
 import Transactions from './pages/Transactions';
 import Accounts from './pages/Accounts';
@@ -70,6 +71,7 @@ function App() {
           <Route path="/recurring" element={<Recurring />} />
           <Route path="/reports" element={<Reports />} />
           <Route path="/chat" element={<Chat />} />
+          <Route path="/change-password" element={<ChangePassword />} />
         </Route>
 
         <Route path="*" element={<Navigate to="/" replace />} />

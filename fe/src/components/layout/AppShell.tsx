@@ -3,6 +3,7 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import {
   ArrowLeftRight,
   BarChart3,
+  KeyRound,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -61,7 +62,13 @@ function NavItems({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
-function UserCard({ onLogout }: { onLogout: () => void }) {
+function UserCard({
+  onLogout,
+  onNavigate,
+}: {
+  onLogout: () => void;
+  onNavigate?: () => void;
+}) {
   const user = useAuthStore((state) => state.user);
 
   if (!user) return null;
@@ -79,10 +86,26 @@ function UserCard({ onLogout }: { onLogout: () => void }) {
           <p className="truncate text-xs text-stone-500">{user.email}</p>
         </div>
       </div>
+      <NavLink
+        to="/change-password"
+        onClick={onNavigate}
+        className={({ isActive }) =>
+          cn(
+            'mt-3 flex w-full items-center justify-center gap-2 rounded-xl border px-3 py-2 text-sm font-semibold transition-colors',
+            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500',
+            isActive
+              ? 'border-brand-300 bg-brand-50 text-brand-800'
+              : 'border-warm-200 bg-surface-card text-stone-600 hover:border-brand-300 hover:bg-brand-50 hover:text-brand-800'
+          )
+        }
+      >
+        <KeyRound className="h-4 w-4" aria-hidden="true" />
+        Change password
+      </NavLink>
       <button
         type="button"
         onClick={onLogout}
-        className="mt-3 flex w-full items-center justify-center gap-2 rounded-xl border border-warm-200 bg-surface-card px-3 py-2 text-sm font-semibold text-stone-600 transition-colors hover:border-expense/30 hover:bg-expense-light/40 hover:text-expense focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+        className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl border border-warm-200 bg-surface-card px-3 py-2 text-sm font-semibold text-stone-600 transition-colors hover:border-expense/30 hover:bg-expense-light/40 hover:text-expense focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
       >
         <LogOut className="h-4 w-4" aria-hidden="true" />
         Logout
@@ -163,7 +186,10 @@ export function AppShell() {
             <div className="mt-8 flex-1">
               <NavItems onNavigate={() => setDrawerOpen(false)} />
             </div>
-            <UserCard onLogout={handleLogout} />
+            <UserCard
+              onLogout={handleLogout}
+              onNavigate={() => setDrawerOpen(false)}
+            />
           </div>
         </div>
       )}
