@@ -1,19 +1,25 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import Chat from '../Chat';
 import { useChatStore } from '../../stores/chatStore';
-import { chatApi } from '../../lib/chatApi';
-import type { ChatFile } from '../../types/chat';
+import { chatApi, ChatApiError } from '../../lib/chatApi';
+import type { ChatFile, ChatTokenUsage } from '../../types/chat';
 
-vi.mock('../../lib/chatApi', () => ({
-  chatApi: {
-    send: vi.fn(),
-    uploadFile: vi.fn(),
-    confirm: vi.fn(),
-    cancel: vi.fn(),
-  },
-}));
+vi.mock('../../lib/chatApi', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../lib/chatApi')>();
+  return {
+    ...actual,
+    chatApi: {
+      send: vi.fn(),
+      uploadFile: vi.fn(),
+      confirm: vi.fn(),
+      cancel: vi.fn(),
+      history: vi.fn(),
+      clear: vi.fn(),
+    },
+  };
+});
 
 const uploadedFile = {
   id: 'file-1',
@@ -32,16 +38,39 @@ const multiSheetFile = {
   sheet_rows: { Sheet1: 12, February: 5, March: 8 },
 };
 
+const emptyUsage: ChatTokenUsage = {
+  used: 0,
+  limit: 50_000,
+  remaining: 50_000,
+  limit_reached: false,
+};
+
+async function renderChatReady() {
+  render(<Chat />);
+  await waitFor(() =>
+    expect(screen.getByLabelText('Message')).toBeEnabled()
+  );
+}
+
 describe('Chat', () => {
   beforeEach(() => {
     vi.mocked(chatApi.send).mockReset();
     vi.mocked(chatApi.uploadFile).mockReset();
     vi.mocked(chatApi.confirm).mockReset();
     vi.mocked(chatApi.cancel).mockReset();
+    vi.mocked(chatApi.history).mockReset();
+    vi.mocked(chatApi.clear).mockReset();
+    vi.mocked(chatApi.history).mockResolvedValue({
+      messages: [],
+      token_usage: emptyUsage,
+    });
     useChatStore.setState({
       entries: [],
+      tokenUsage: emptyUsage,
       isLoading: false,
+      isLoadingHistory: false,
       isConfirming: false,
+      isClearing: false,
       error: null,
       attachedFile: null,
       selectedSheet: null,
@@ -50,15 +79,50 @@ describe('Chat', () => {
     });
   });
 
-  it('shows an empty state with suggestions', () => {
+  it('shows an empty state with suggestions', async () => {
     render(<Chat />);
 
     expect(
-      screen.getByText(/ask me anything about your finances/i)
+      await screen.findByText(/ask me anything about your finances/i)
     ).toBeInTheDocument();
     expect(
       screen.getByRole('button', { name: /what are my account balances/i })
     ).toBeInTheDocument();
+  });
+
+  it('loads the saved conversation and token usage on mount', async () => {
+    vi.mocked(chatApi.history).mockResolvedValue({
+      messages: [
+        {
+          id: 'message-1',
+          role: 'user',
+          content: 'Earlier question',
+          created_at: '2026-11-08T10:00:00Z',
+        },
+        {
+          id: 'message-2',
+          role: 'assistant',
+          content: 'Earlier answer',
+          created_at: '2026-11-08T10:00:01Z',
+        },
+      ],
+      token_usage: {
+        used: 1_234,
+        limit: 50_000,
+        remaining: 48_766,
+        limit_reached: false,
+      },
+    });
+
+    render(<Chat />);
+
+    expect(await screen.findByText('Earlier answer')).toBeInTheDocument();
+    expect(screen.getByText('Earlier question')).toBeInTheDocument();
+    expect(chatApi.history).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/≈ 1,234 \/ 50,000/)).toBeInTheDocument();
+    expect(
+      screen.getByRole('progressbar', { name: /conversation token usage/i })
+    ).toHaveAttribute('aria-valuenow', '1234');
   });
 
   it('sends a message and renders the reply with tool chips', async () => {
@@ -68,16 +132,14 @@ describe('Chat', () => {
       tool_calls: [{ name: 'list_accounts', summary: 'Listed 1 accounts' }],
     });
 
-    render(<Chat />);
+    await renderChatReady();
 
     await user.type(screen.getByLabelText('Message'), 'Which accounts do I have?');
     await user.click(screen.getByRole('button', { name: /send/i }));
 
     expect(await screen.findByText('You have one account: Cash.')).toBeInTheDocument();
     expect(screen.getByText('list accounts')).toBeInTheDocument();
-    expect(chatApi.send).toHaveBeenCalledWith([
-      { role: 'user', content: 'Which accounts do I have?' },
-    ]);
+    expect(chatApi.send).toHaveBeenCalledWith('Which accounts do I have?');
   });
 
   it('renders markdown formatting in assistant replies', async () => {
@@ -87,7 +149,7 @@ describe('Chat', () => {
       tool_calls: [],
     });
 
-    render(<Chat />);
+    await renderChatReady();
 
     await user.type(screen.getByLabelText('Message'), 'How much did I spend?');
     await user.click(screen.getByRole('button', { name: /send/i }));
@@ -112,7 +174,7 @@ describe('Chat', () => {
       tool_calls: [],
     });
 
-    render(<Chat />);
+    await renderChatReady();
 
     await user.type(screen.getByLabelText('Message'), 'Delete my coffee expense');
     await user.click(screen.getByRole('button', { name: /send/i }));
@@ -133,7 +195,7 @@ describe('Chat', () => {
     const user = userEvent.setup();
     vi.mocked(chatApi.send).mockRejectedValue(new Error('chat is not configured'));
 
-    render(<Chat />);
+    await renderChatReady();
 
     await user.type(screen.getByLabelText('Message'), 'hello');
     await user.click(screen.getByRole('button', { name: /send/i }));
@@ -143,11 +205,31 @@ describe('Chat', () => {
     );
   });
 
+  it('blocks input and shows the banner when the token limit is reached', async () => {
+    const user = userEvent.setup();
+    vi.mocked(chatApi.send).mockRejectedValue(
+      new ChatApiError('chat token limit reached; clear the chat to continue', 429)
+    );
+
+    await renderChatReady();
+
+    await user.type(screen.getByLabelText('Message'), 'one more question');
+    await user.click(screen.getByRole('button', { name: /send/i }));
+
+    expect(
+      await screen.findByText('Token limit reached. Clear the chat to continue.')
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Message')).toBeDisabled();
+    expect(screen.getByRole('button', { name: /send/i })).toBeDisabled();
+    expect(screen.getByLabelText('Attach spreadsheet')).toBeDisabled();
+    expect(screen.queryByText('chat token limit reached')).not.toBeInTheDocument();
+  });
+
   it('uploads a spreadsheet and shows a chip', async () => {
     const user = userEvent.setup();
     vi.mocked(chatApi.uploadFile).mockResolvedValue(uploadedFile);
 
-    render(<Chat />);
+    await renderChatReady();
 
     const file = new File(['date,amount'], 'budget.xlsx', {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -173,7 +255,7 @@ describe('Chat', () => {
         tool_calls: [],
       });
 
-    render(<Chat />);
+    await renderChatReady();
 
     await user.upload(
       screen.getByLabelText('Attach spreadsheet'),
@@ -185,23 +267,13 @@ describe('Chat', () => {
     await user.click(screen.getByRole('button', { name: /send/i }));
 
     expect(await screen.findByText('Imported 12 rows.')).toBeInTheDocument();
-    expect(chatApi.send).toHaveBeenLastCalledWith(
-      [{ role: 'user', content: 'Import this file' }],
-      'file-1'
-    );
+    expect(chatApi.send).toHaveBeenLastCalledWith('Import this file', 'file-1');
 
     await user.type(screen.getByLabelText('Message'), 'How many rows?');
     await user.click(screen.getByRole('button', { name: /send/i }));
 
     expect(await screen.findByText('The file has 12 rows.')).toBeInTheDocument();
-    expect(chatApi.send).toHaveBeenLastCalledWith(
-      [
-        { role: 'user', content: 'Import this file' },
-        { role: 'assistant', content: 'Imported 12 rows.' },
-        { role: 'user', content: 'How many rows?' },
-      ],
-      'file-1'
-    );
+    expect(chatApi.send).toHaveBeenLastCalledWith('How many rows?', 'file-1');
   });
 
   it('removes the attachment and stops sending its file id', async () => {
@@ -209,7 +281,7 @@ describe('Chat', () => {
     vi.mocked(chatApi.uploadFile).mockResolvedValue(uploadedFile);
     vi.mocked(chatApi.send).mockResolvedValue({ reply: 'Sure.', tool_calls: [] });
 
-    render(<Chat />);
+    await renderChatReady();
 
     await user.upload(
       screen.getByLabelText('Attach spreadsheet'),
@@ -226,9 +298,7 @@ describe('Chat', () => {
     await user.click(screen.getByRole('button', { name: /send/i }));
 
     await screen.findByText('Sure.');
-    expect(chatApi.send).toHaveBeenLastCalledWith([
-      { role: 'user', content: 'Hello' },
-    ]);
+    expect(chatApi.send).toHaveBeenLastCalledWith('Hello');
   });
 
   it('selects a sheet for a multi-sheet upload and sends it without re-uploading', async () => {
@@ -239,7 +309,7 @@ describe('Chat', () => {
       tool_calls: [],
     });
 
-    render(<Chat />);
+    await renderChatReady();
 
     await user.upload(
       screen.getByLabelText('Attach spreadsheet'),
@@ -261,7 +331,7 @@ describe('Chat', () => {
 
     expect(await screen.findByText('Ready.')).toBeInTheDocument();
     expect(chatApi.send).toHaveBeenLastCalledWith(
-      [{ role: 'user', content: 'Import February' }],
+      'Import February',
       'file-1',
       'February'
     );
@@ -272,7 +342,7 @@ describe('Chat', () => {
     const user = userEvent.setup();
     vi.mocked(chatApi.uploadFile).mockResolvedValue(uploadedFile);
 
-    render(<Chat />);
+    await renderChatReady();
 
     await user.upload(
       screen.getByLabelText('Attach spreadsheet'),
@@ -284,34 +354,39 @@ describe('Chat', () => {
     expect(screen.getByText(/sheet sheet1/i)).toBeInTheDocument();
   });
 
-  it('clears the conversation after confirmation', async () => {
+  it('clears the conversation on the server after confirmation', async () => {
     const user = userEvent.setup();
     vi.mocked(chatApi.send).mockResolvedValue({ reply: 'Hello.', tool_calls: [] });
+    vi.mocked(chatApi.clear).mockResolvedValue({ message: 'chat cleared' });
 
-    render(<Chat />);
+    await renderChatReady();
 
     await user.type(screen.getByLabelText('Message'), 'hello');
     await user.click(screen.getByRole('button', { name: /send/i }));
     await screen.findByText('Hello.');
 
-    await user.click(
-      screen.getByRole('button', { name: /clear conversation/i })
-    );
+    await user.click(screen.getByRole('button', { name: /clear chat/i }));
     const dialog = screen.getByRole('dialog');
-    await user.click(within(dialog).getByRole('button', { name: 'Clear' }));
+    expect(
+      within(dialog).getByText(/permanently deletes the conversation from the server/i)
+    ).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: /clear chat/i }));
 
+    await waitFor(() => expect(chatApi.clear).toHaveBeenCalledTimes(1));
     expect(
       await screen.findByText(/ask me anything about your finances/i)
     ).toBeInTheDocument();
     expect(screen.queryByText('Hello.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
   });
 
-  it('shows upload failures inline', async () => {    const user = userEvent.setup();
+  it('shows upload failures inline', async () => {
+    const user = userEvent.setup();
     vi.mocked(chatApi.uploadFile).mockRejectedValue(
       new Error('file is too large')
     );
 
-    render(<Chat />);
+    await renderChatReady();
 
     await user.upload(
       screen.getByLabelText('Attach spreadsheet'),
@@ -329,7 +404,7 @@ describe('Chat', () => {
       new Promise<ChatFile>(() => undefined)
     );
 
-    render(<Chat />);
+    await renderChatReady();
 
     await user.upload(
       screen.getByLabelText('Attach spreadsheet'),

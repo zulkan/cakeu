@@ -1,11 +1,11 @@
 import { create } from 'zustand';
-import { chatApi } from '../lib/chatApi';
+import { chatApi, ChatApiError } from '../lib/chatApi';
 import type {
   ChatEntry,
   ChatFile,
-  ChatMessage,
   ChatPendingAction,
   ChatResponse,
+  ChatTokenUsage,
 } from '../types/chat';
 
 let sequence = 0;
@@ -15,32 +15,34 @@ function nextId(prefix: string): string {
   return `${prefix}-${Date.now()}-${sequence}`;
 }
 
-function toHistory(entries: ChatEntry[]): ChatMessage[] {
-  return entries.map((entry) => ({
-    role: entry.role,
-    content: entry.content,
-  }));
-}
-
-function sendHistory(
-  history: ChatMessage[],
+function sendChat(
+  content: string,
   fileId?: string,
   sheet?: string
 ): Promise<ChatResponse> {
-  if (fileId && sheet) return chatApi.send(history, fileId, sheet);
-  if (fileId) return chatApi.send(history, fileId);
-  return chatApi.send(history);
+  if (fileId && sheet) return chatApi.send(content, fileId, sheet);
+  if (fileId) return chatApi.send(content, fileId);
+  return chatApi.send(content);
+}
+
+function markLimitReached(usage: ChatTokenUsage | null): ChatTokenUsage {
+  if (usage) return { ...usage, limit_reached: true };
+  return { used: 0, limit: 0, remaining: 0, limit_reached: true };
 }
 
 interface ChatState {
   entries: ChatEntry[];
+  tokenUsage: ChatTokenUsage | null;
   isLoading: boolean;
+  isLoadingHistory: boolean;
   isConfirming: boolean;
+  isClearing: boolean;
   error: string | null;
   attachedFile: ChatFile | null;
   selectedSheet: string | null;
   isUploading: boolean;
   uploadError: string | null;
+  loadHistory: () => Promise<void>;
   sendMessage: (text: string) => Promise<void>;
   attachFile: (file: File) => Promise<void>;
   selectSheet: (name: string) => void;
@@ -48,22 +50,52 @@ interface ChatState {
   confirmAction: (action: ChatPendingAction) => Promise<void>;
   cancelAction: (action: ChatPendingAction) => Promise<void>;
   clearError: () => void;
-  clear: () => void;
+  clear: () => Promise<void>;
 }
 
 export const useChatStore = create<ChatState>()((set, get) => ({
   entries: [],
+  tokenUsage: null,
   isLoading: false,
+  isLoadingHistory: false,
   isConfirming: false,
+  isClearing: false,
   error: null,
   attachedFile: null,
   selectedSheet: null,
   isUploading: false,
   uploadError: null,
 
+  loadHistory: async () => {
+    if (get().isLoadingHistory) return;
+    set({ isLoadingHistory: true, error: null });
+
+    try {
+      const history = await chatApi.history();
+      set({
+        entries: history.messages.map((message) => ({
+          id: message.id,
+          role: message.role,
+          content: message.content,
+          toolCalls: [],
+        })),
+        tokenUsage: history.token_usage,
+        isLoadingHistory: false,
+      });
+    } catch (failure) {
+      set({
+        isLoadingHistory: false,
+        error:
+          failure instanceof Error
+            ? failure.message
+            : 'Unable to load your conversation.',
+      });
+    }
+  },
+
   sendMessage: async (text) => {
     const content = text.trim();
-    if (!content || get().isUploading) return;
+    if (!content || get().isUploading || get().tokenUsage?.limit_reached) return;
 
     const userEntry: ChatEntry = {
       id: nextId('user'),
@@ -72,7 +104,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       toolCalls: [],
     };
 
-    const history = [...get().entries, userEntry];
     const attached = get().attachedFile;
     const fileId = attached?.id;
     const sheet =
@@ -80,10 +111,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         ? get().selectedSheet ?? undefined
         : undefined;
 
-    set({ entries: history, isLoading: true, error: null });
+    set((state) => ({
+      entries: [...state.entries, userEntry],
+      isLoading: true,
+      error: null,
+    }));
 
     try {
-      const response = await sendHistory(toHistory(history), fileId, sheet);
+      const response = await sendChat(content, fileId, sheet);
       set((state) => ({
         entries: [
           ...state.entries,
@@ -96,15 +131,23 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           },
         ],
         isLoading: false,
+        tokenUsage: response.token_usage ?? state.tokenUsage,
       }));
     } catch (failure) {
-      set({
+      const limitReached =
+        failure instanceof ChatApiError && failure.status === 429;
+
+      set((state) => ({
         isLoading: false,
-        error:
-          failure instanceof Error
+        tokenUsage: limitReached
+          ? markLimitReached(state.tokenUsage)
+          : state.tokenUsage,
+        error: limitReached
+          ? null
+          : failure instanceof Error
             ? failure.message
             : 'The assistant is unavailable right now.',
-      });
+      }));
     }
   },
 
@@ -159,6 +202,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           },
         ],
         isConfirming: false,
+        tokenUsage: response.token_usage ?? state.tokenUsage,
       }));
     } catch (failure) {
       set({
@@ -194,14 +238,32 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   clearError: () => set({ error: null }),
-  clear: () =>
-    set({
-      entries: [],
-      error: null,
-      isLoading: false,
-      attachedFile: null,
-      selectedSheet: null,
-      isUploading: false,
-      uploadError: null,
-    }),
+
+  clear: async () => {
+    if (get().isClearing) return;
+    set({ isClearing: true, error: null });
+
+    try {
+      await chatApi.clear();
+      set({
+        entries: [],
+        tokenUsage: null,
+        error: null,
+        isLoading: false,
+        attachedFile: null,
+        selectedSheet: null,
+        isUploading: false,
+        uploadError: null,
+        isClearing: false,
+      });
+    } catch (failure) {
+      set({
+        isClearing: false,
+        error:
+          failure instanceof Error
+            ? failure.message
+            : 'Unable to clear the conversation.',
+      });
+    }
+  },
 }));

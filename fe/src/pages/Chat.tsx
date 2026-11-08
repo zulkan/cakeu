@@ -27,15 +27,23 @@ const suggestions = [
   'Log 45.00 for groceries from Cash today',
 ];
 
+function formatTokens(value: number): string {
+  return value.toLocaleString('en-US');
+}
+
 function Chat() {
   const entries = useChatStore((state) => state.entries);
+  const tokenUsage = useChatStore((state) => state.tokenUsage);
   const isLoading = useChatStore((state) => state.isLoading);
+  const isLoadingHistory = useChatStore((state) => state.isLoadingHistory);
   const isConfirming = useChatStore((state) => state.isConfirming);
+  const isClearing = useChatStore((state) => state.isClearing);
   const error = useChatStore((state) => state.error);
   const attachedFile = useChatStore((state) => state.attachedFile);
   const selectedSheet = useChatStore((state) => state.selectedSheet);
   const isUploading = useChatStore((state) => state.isUploading);
   const uploadError = useChatStore((state) => state.uploadError);
+  const loadHistory = useChatStore((state) => state.loadHistory);
   const sendMessage = useChatStore((state) => state.sendMessage);
   const attachFile = useChatStore((state) => state.attachFile);
   const selectSheet = useChatStore((state) => state.selectSheet);
@@ -50,6 +58,17 @@ function Chat() {
       attachedFile.rows
     : 0;
   const scrollRef = useRef<HTMLDivElement>(null);
+  const limitReached = tokenUsage?.limit_reached ?? false;
+  const inputsDisabled =
+    isLoading || isUploading || isLoadingHistory || limitReached;
+  const tokenPercent =
+    tokenUsage && tokenUsage.limit > 0
+      ? Math.min(100, Math.round((tokenUsage.used / tokenUsage.limit) * 100))
+      : 0;
+
+  useEffect(() => {
+    void loadHistory();
+  }, [loadHistory]);
 
   useEffect(() => {
     const element = scrollRef.current;
@@ -59,7 +78,7 @@ function Chat() {
 
   const submit = async () => {
     const text = draft.trim();
-    if (!text || isLoading || isUploading) return;
+    if (!text || inputsDisabled) return;
     setDraft('');
     await sendMessage(text);
   };
@@ -75,17 +94,47 @@ function Chat() {
       <PageHeader
         title="Assistant"
         description="Ask about your money, or tell me what to record."
-        action={
-          <Button
-            variant="secondary"
-            onClick={() => setClearOpen(true)}
-            disabled={entries.length === 0 || isLoading}
-          >
-            <Trash2 className="h-4 w-4" aria-hidden="true" />
-            Clear conversation
-          </Button>
-        }
       />
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        {tokenUsage && tokenUsage.limit > 0 ? (
+          <div className="flex items-center gap-3">
+            <span
+              className="rounded-full bg-brand-50 px-3 py-1 text-xs font-semibold text-brand-700"
+              title="Approximate conversation token usage — not billing."
+            >
+              ≈ {formatTokens(tokenUsage.used)} / {formatTokens(tokenUsage.limit)}
+            </span>
+            <div
+              role="progressbar"
+              aria-label="Conversation token usage"
+              aria-valuemin={0}
+              aria-valuemax={tokenUsage.limit}
+              aria-valuenow={Math.min(tokenUsage.used, tokenUsage.limit)}
+              className="h-1.5 w-28 overflow-hidden rounded-full bg-warm-200"
+            >
+              <div
+                className={cn(
+                  'h-full rounded-full transition-[width]',
+                  limitReached ? 'bg-expense' : 'bg-brand-500'
+                )}
+                style={{ width: `${tokenPercent}%` }}
+              />
+            </div>
+          </div>
+        ) : (
+          <span />
+        )}
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => setClearOpen(true)}
+          disabled={entries.length === 0 || isLoading || isClearing}
+        >
+          <Trash2 className="h-4 w-4" aria-hidden="true" />
+          Clear chat
+        </Button>
+      </div>
 
       {error && (
         <div
@@ -97,12 +146,31 @@ function Chat() {
         </div>
       )}
 
+      {limitReached && (
+        <div
+          role="alert"
+          aria-live="assertive"
+          className="flex items-start gap-2 rounded-xl border border-expense/20 bg-expense-light/40 px-4 py-3 text-sm font-medium text-expense"
+        >
+          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
+          <span>Token limit reached. Clear the chat to continue.</span>
+        </div>
+      )}
+
       <div
         ref={scrollRef}
         className="flex-1 space-y-4 overflow-y-auto rounded-2xl border border-warm-200 bg-surface p-4"
         aria-live="polite"
       >
-        {entries.length === 0 ? (
+        {isLoadingHistory ? (
+          <div
+            role="status"
+            className="flex h-full items-center justify-center gap-2 text-sm text-stone-500"
+          >
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+            Loading conversation…
+          </div>
+        ) : entries.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-4 text-center">
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-brand-100 text-brand-600">
               <Sparkles className="h-7 w-7" aria-hidden="true" />
@@ -122,7 +190,7 @@ function Chat() {
                   key={suggestion}
                   type="button"
                   onClick={() => void sendMessage(suggestion)}
-                  disabled={isLoading}
+                  disabled={inputsDisabled}
                   className="rounded-full border border-warm-200 bg-surface-card px-3 py-1.5 text-xs font-medium text-stone-600 transition-colors hover:border-brand-300 hover:bg-brand-50 hover:text-brand-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {suggestion}
@@ -239,7 +307,7 @@ function Chat() {
                     id="chat-sheet"
                     value={selectedSheet ?? attachedFile.sheet}
                     onChange={(event) => selectSheet(event.target.value)}
-                    disabled={isLoading || isUploading}
+                    disabled={inputsDisabled}
                     className="max-w-[11rem] text-xs"
                   >
                     {attachedFile.sheets.map((name) => (
@@ -304,7 +372,7 @@ function Chat() {
               'inline-flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-xl border border-warm-200 bg-surface-card text-stone-600 transition-colors',
               'hover:border-brand-300 hover:bg-brand-50 hover:text-brand-800',
               'focus-within:ring-2 focus-within:ring-brand-500 focus-within:ring-offset-2 focus-within:ring-offset-surface',
-              (isLoading || isUploading) && 'cursor-not-allowed opacity-50'
+              inputsDisabled && 'cursor-not-allowed opacity-50'
             )}
           >
             <Paperclip className="h-4 w-4" aria-hidden="true" />
@@ -313,7 +381,7 @@ function Chat() {
               type="file"
               accept=".csv,.xlsx,.xls"
               onChange={handleFileChange}
-              disabled={isLoading || isUploading}
+              disabled={inputsDisabled}
               className="sr-only"
             />
           </label>
@@ -333,11 +401,11 @@ function Chat() {
             rows={2}
             placeholder="Ask about your spending, or log a transaction…"
             className={`${inputClass} min-h-[3rem] resize-none`}
-            disabled={isLoading}
+            disabled={inputsDisabled}
           />
           <Button
             type="submit"
-            disabled={isLoading || isUploading || draft.trim() === ''}
+            disabled={inputsDisabled || draft.trim() === ''}
           >
             <Send className="h-4 w-4" aria-hidden="true" />
             Send
@@ -348,11 +416,11 @@ function Chat() {
       <ConfirmDialog
         open={clearOpen}
         title="Clear conversation?"
-        description="This removes the visible chat history from this browser. Transactions already recorded are not affected."
-        confirmLabel="Clear"
+        description="This permanently deletes the conversation from the server. Transactions already recorded are not affected."
+        confirmLabel="Clear chat"
+        isLoading={isClearing}
         onConfirm={() => {
-          clear();
-          setClearOpen(false);
+          void clear().then(() => setClearOpen(false));
         }}
         onCancel={() => setClearOpen(false)}
       />
